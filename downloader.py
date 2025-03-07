@@ -17,12 +17,15 @@ import base64
 import pickle
 from datetime import timedelta
 import webbrowser
+import subprocess
 
 # Tool version
-VERSION = "2.5.0"
+VERSION = "2.5.3"  # Updated version number
 
 # Server URL for License Verification
 SERVER_URL = "https://raw.githubusercontent.com/aziztech1234/License-Keys/main/keys.json"
+# GitHub URL for updates
+UPDATE_URL = "https://raw.githubusercontent.com/aziztech1234/UltraFastVideoDownloader/main/downloader.py"
 
 # Global variables
 root = None
@@ -37,10 +40,35 @@ download_button = None  # Global reference to the download button
 start_bulk_button = None  # Global reference to bulk download button
 header_label = None
 status_label = None
+right_click_menu = None
+context_menu_row = None
 
 # Set theme appearance
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("green")
+
+# Function to center windows relative to root window
+def center_window(window, width, height):
+    if root:
+        # Get root window position and size
+        root_x = root.winfo_x()
+        root_y = root.winfo_y()
+        root_width = root.winfo_width()
+        root_height = root.winfo_height()
+        
+        # Calculate position for centering
+        x = root_x + (root_width // 2) - (width // 2)
+        y = root_y + (root_height // 2) - (height // 2)
+        
+        # Set geometry
+        window.geometry(f"{width}x{height}+{x}+{y}")
+    else:
+        # Center on screen if root not available
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
 # License Key Verification Function
 def is_key_valid(user_key):
@@ -117,13 +145,15 @@ def detect_platform(url):
         return "TikTok"
     elif 'instagram' in domain:
         return "Instagram"
-    elif 'facebook' in domain or 'fb.com' in domain:
+    elif 'facebook' in domain or 'fb.com' in domain or 'fb.watch' in domain:
         return "Facebook"
     else:
         return "Other"
 
 # Function to clean up filename
 def clean_filename(filename):
+    if filename is None:
+        return "Unknown"
     # Remove illegal characters for filenames
     filename = re.sub(r'[\\/*?:"<>|]', "", filename)
     # Remove extra spaces
@@ -157,6 +187,118 @@ def update_header_message(message, color="#FFFFFF"):
         # Update the status label with the message instead of the header
         status_label.configure(text=message)
 
+# Get video output path from a row_id
+def get_video_output_path(row_id):
+    """Get the expected output path for a video based on its URL and title with more robust path detection"""
+    try:
+        if not video_table or not row_id:
+            return None
+            
+        values = video_table.item(row_id, "values")
+        title = values[3] if len(values) > 3 else "Unknown"
+        
+        # Get URL from either table row or tags
+        url = values[1] if len(values) > 1 else None
+        tags = video_table.item(row_id, "tags")
+        
+        # If URL wasn't in values, try to get from tags
+        if not url:
+            for tag in tags:
+                if tag != "url" and tag != "completed" and tag != "failed" and tag != "editing":
+                    url = tag
+                    break
+                    
+        if not url:
+            return None
+            
+        # Get platform
+        platform = detect_platform(url)
+        
+        # Get download path
+        download_dir = download_path.get() or settings.get("default_download_path", 
+                                                         os.path.join(os.path.expanduser("~"), "Downloads"))
+        platform_path = os.path.join(download_dir, platform)
+        
+        # Debug message - useful for troubleshooting path issues
+        print(f"Looking for video in {platform_path} with title: {title}")
+        
+        # Check if the folder exists
+        if not os.path.exists(platform_path):
+            return None
+            
+        # For Facebook and TikTok, use a more thorough search approach
+        # Since these platforms often have more complex filenames
+        if platform in ["Facebook", "TikTok", "Instagram"]:
+            # List all video files in the directory
+            video_files = []
+            for file in os.listdir(platform_path):
+                if file.lower().endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov')):
+                    video_files.append(file)
+                    
+            # Sort by modification time (newest first)
+            video_files.sort(key=lambda x: os.path.getmtime(os.path.join(platform_path, x)), reverse=True)
+            
+            # First, check if we have any files at all
+            if video_files:
+                # For Facebook, the newest file is probably the one we want
+                newest_file = video_files[0]
+                print(f"Found newest video file: {newest_file}")
+                return os.path.join(platform_path, newest_file)
+        
+        # For other platforms, try to match by title
+        simplified_title = clean_filename(title.lower())
+        
+        # Check if we have the direct output file path in progress_info
+        for info_url, info in progress_info.items():
+            if url == info_url and 'output_file' in info and info['output_file']:
+                if os.path.exists(info['output_file']):
+                    print(f"Found exact file via progress_info: {info['output_file']}")
+                    return info['output_file']
+        
+        # Search for files with title in the name
+        matching_files = []
+        for file in os.listdir(platform_path):
+            file_lower = file.lower()
+            if file_lower.endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov')):
+                if simplified_title in file_lower:
+                    matching_files.append(file)
+                    
+        if matching_files:
+            # Sort by modification time (newest first)
+            matching_files.sort(key=lambda x: os.path.getmtime(os.path.join(platform_path, x)), reverse=True)
+            newest_match = matching_files[0]
+            print(f"Found matching file by title: {newest_match}")
+            return os.path.join(platform_path, newest_match)
+            
+        # If still not found, try searching for any part of the URL in the filename
+        url_parts = url.split('/')
+        for part in url_parts:
+            if len(part) > 5:  # Only consider meaningful parts (not just "www" etc)
+                for file in os.listdir(platform_path):
+                    file_lower = file.lower()
+                    if file_lower.endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov')):
+                        if part.lower() in file_lower:
+                            print(f"Found file by URL part: {file}")
+                            return os.path.join(platform_path, file)
+        
+        # If we still haven't found it, just return the most recent video file
+        video_files = []
+        for file in os.listdir(platform_path):
+            if file.lower().endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov')):
+                video_files.append(file)
+                
+        if video_files:
+            # Sort by modification time (newest first)
+            video_files.sort(key=lambda x: os.path.getmtime(os.path.join(platform_path, x)), reverse=True)
+            newest_file = video_files[0]
+            print(f"Found newest video file as last resort: {newest_file}")
+            return os.path.join(platform_path, newest_file)
+        
+        return None
+    except Exception as e:
+        print(f"Error getting video path: {str(e)}")
+        return None
+
 # Progress Hook Function
 class ProgressManager:
     def __init__(self, url, row_id):
@@ -167,6 +309,8 @@ class ProgressManager:
         self.author = None
         self.duration = None
         self.filesize = None
+        self.output_file = None
+        self.hashtags = None
         
     def update_progress(self, d):
         global progress_info
@@ -178,6 +322,10 @@ class ProgressManager:
                 speed = d.get('_speed_str', 'N/A').strip()
                 eta = d.get('_eta_str', '').strip()
                 
+                # Track output filename if available
+                if 'filename' in d:
+                    self.output_file = d['filename']
+                
                 # Get video metadata if available
                 if not self.title and 'info_dict' in d:
                     info = d['info_dict']
@@ -185,6 +333,12 @@ class ProgressManager:
                     self.author = info.get('uploader', info.get('channel', 'Unknown Author'))
                     self.duration = info.get('duration')
                     self.filesize = info.get('filesize')
+                    
+                    # Get hashtags if available (for Instagram and TikTok)
+                    if 'hashtags' in info:
+                        self.hashtags = info.get('hashtags', [])
+                    elif 'tags' in info:
+                        self.hashtags = info.get('tags', [])
                     
                     # Update the table with metadata
                     root.after(0, lambda: update_video_metadata(self.row_id, self.title, self.author, self.duration, self.filesize))
@@ -194,7 +348,9 @@ class ProgressManager:
                     'percentage': percentage,
                     'speed': speed,
                     'eta': eta,
-                    'title': self.title
+                    'title': self.title,
+                    'hashtags': self.hashtags,
+                    'output_file': self.output_file
                 }
                 
                 # Update overall progress in status bar
@@ -212,8 +368,19 @@ class ProgressManager:
                 print(f"Progress update error: {str(e)}")
                 
         elif d['status'] == 'finished':
+            # The download part is finished, now it's post-processing
             elapsed = time.time() - self.start_time
             root.after(0, lambda: update_video_status(self.row_id, f"Processing...", f"{elapsed:.1f}s"))
+            
+            # Store output file if set
+            if self.output_file and self.url in progress_info:
+                progress_info[self.url]['output_file'] = self.output_file
+            
+        elif d['status'] == 'error':
+            # An error occurred during download
+            error_msg = d.get('error', 'Unknown error')
+            print(f"Download error: {error_msg}")
+            root.after(0, lambda: update_video_status(self.row_id, "Failed", str(error_msg)[:20]))
             
             # Remove from progress tracking
             if self.url in progress_info:
@@ -223,6 +390,9 @@ class ProgressManager:
 def update_video_status(row_id, status, extra_info=""):
     """Update the status column in the video table"""
     try:
+        if not video_table:
+            return
+            
         values = list(video_table.item(row_id, "values"))
         values[2] = status  # Update status column (third column)
         if extra_info:
@@ -232,18 +402,29 @@ def update_video_status(row_id, status, extra_info=""):
         
         # Update the row style based on status
         if "Completed" in status:
-            video_table.item(row_id, tags=("completed",))
+            # Preserve the URL in tags when marking as completed
+            url = values[1] if len(values) > 1 else None
+            video_table.item(row_id, values=values, tags=("completed", url))
         elif "Failed" in status:
-            video_table.item(row_id, tags=("failed",))
+            # Keep the URL in tags when marking as failed
+            url = values[1] if len(values) > 1 else None
+            video_table.item(row_id, tags=("failed", url))
+        elif "Paused" in status:
+            # Keep the URL in tags when marking as paused
+            url = values[1] if len(values) > 1 else None
+            video_table.item(row_id, tags=("paused", url))
     except Exception as e:
         print(f"Update video status error: {str(e)}")
 
 def update_video_metadata(row_id, title, author, duration, filesize):
     """Update video metadata in the table"""
     try:
+        if not video_table:
+            return
+            
         values = list(video_table.item(row_id, "values"))
         # Update title, author, time, size columns
-        values[3] = title if title else "Unknown"  # Titles (4th column)
+        values[3] = clean_filename(title) if title else "Unknown"  # Titles (4th column)
         values[4] = author if author else "Unknown"  # Author (5th column)
         values[5] = format_duration(duration) if values[5] == "Unknown" else values[5]  # Time (6th column)
         values[6] = format_size(filesize)  # Size (7th column)
@@ -253,6 +434,9 @@ def update_video_metadata(row_id, title, author, duration, filesize):
 
 # Update overall progress in status bar
 def update_overall_progress():
+    if not status_label or not progress_bar:
+        return
+        
     if not progress_info:
         status_label.configure(text="Waiting for download...")
         progress_bar.set(0)
@@ -288,59 +472,61 @@ def update_overall_progress():
 
 # Get optimized format options based on platform - ENHANCED VERSION
 def get_format_options(platform, quality):
+    """
+    Returns optimized format selection strings for different platforms.
+    Updated to fix issues with YouTube, Instagram, and TikTok.
+    """
     if platform == "YouTube":
+        # Updated YouTube format selection to work with recent changes
         if quality == "Max Quality":
-            # Optimized for YouTube - prefer mp4 for direct compatibility
-            return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            return 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b'
         else:
-            return f'bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={quality}][ext=mp4]/best'
+            return f'bv*[height<={quality}][ext=mp4]+ba[ext=m4a]/b[height<={quality}][ext=mp4] / bv*[height<={quality}]+ba/b[height<={quality}]'
     elif platform == "Facebook":
-        # ENHANCED: Facebook specific format options with multiple fallbacks
-        if quality == "Max Quality":
-            return 'dash_sd_src/dash_hd_src/hd_src/sd_src/high/low'
-        else:
-            return f'dash_sd_src/sd_src/high/low'
+        # Facebook format selection - works fine, kept as is
+        return 'best[ext=mp4]/dash_sd_src/dash_hd_src/hd_src/sd_src'
     elif platform == "TikTok":
-        # ENHANCED: TikTok specific format with proper quality selection
-        if quality == "Max Quality":
-            return 'bestvideo+bestaudio/best/download_addr-0/play_addr-0'
-        else:
-            return f'play_addr-0/download_addr-0'
+        # Enhanced TikTok format to avoid HEVC issues completely
+        return 'bv*[vcodec!*=hevc][vcodec!*=h265]+ba/b[vcodec!*=hevc][vcodec!*=h265]/b'
     elif platform == "Instagram":
-        # ENHANCED: Instagram specific format options
-        if quality == "Max Quality":
-            return 'dash_hd/dash_sd/high/low'
-        else:
-            return 'high/low'
+        # Improved Instagram format selection for better metadata
+        return 'best/dash_hd/dash_sd'
     else:
-        # Default for other platforms
+        # Default improved format for other platforms
         if quality == "Max Quality":
-            return 'bestvideo+bestaudio/best'
+            return 'bv*+ba/b'
         else:
-            return f'bestvideo[height<={quality}]+bestaudio/best[height<={quality}]'
+            return f'bv*[height<={quality}]+ba/b[height<={quality}]'
 
-# Get platform-specific FFmpeg parameters
-def get_ffmpeg_params(platform):
-    # Common parameters
-    params = [
-        '-c:v', 'libx264',      # Force H.264 video codec
-        '-c:a', 'aac',          # Use AAC for audio
-        '-strict', 'experimental'
-    ]
+# Enhanced platform-specific user agents
+def get_platform_user_agent(platform):
+    """
+    Returns optimized user agents for different platforms.
+    Updated with more modern user agent strings.
+    """
+    # Modern desktop user agent
+    common_desktop = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     
-    # Platform-specific optimizations
-    if platform == "YouTube" or platform == "Facebook":
-        params.extend([
-            '-movflags', '+faststart',  # Optimize for web streaming
-            '-preset', 'medium',        # Balance between speed and quality
-            '-crf', '23',               # Reasonable quality setting
-            '-threads', '4'             # Use multiple threads for encoding
-        ])
-    
-    return params
+    if platform == "YouTube":
+        # Modern Chrome user agent for YouTube
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    elif platform == "TikTok":
+        # TikTok works better with mobile user agents
+        return "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+    elif platform == "Instagram":
+        # Updated Instagram app-like user agent
+        return "Instagram 271.0.0.16.108 Android (33/13; 420dpi; 1080x2210; Google/google; Pixel 7; panther; armv8l; en_US; 429794285)"
+    elif platform == "Facebook":
+        # Updated Facebook user agent
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+    else:
+        return common_desktop
 
 # Video Download Function - ENHANCED VERSION WITH PLATFORM FIXES
 def download_video(url, download_path, quality, thread_count, row_id):
+    """
+    Main download function, updated to fix issues with all platforms.
+    """
     platform = detect_platform(url)
     
     # Create platform-specific folder
@@ -365,7 +551,7 @@ def download_video(url, download_path, quality, thread_count, row_id):
         # Standard output format
         output_template = '%(title)s.%(ext)s'
     
-    # Prepare download options - ENHANCED PLATFORM-SPECIFIC CONFIGURATION
+    # Prepare base download options
     ydl_opts = {
         'format': format_option,
         'outtmpl': os.path.join(platform_path, output_template),
@@ -379,77 +565,143 @@ def download_video(url, download_path, quality, thread_count, row_id):
         'subtitleslangs': ['en'] if settings.get("write_subtitles", False) else None,
         'embedsubtitles': settings.get("embed_subtitles", False),
         'nooverwrites': False,
-        'retries': settings.get("retries", 5),  # INCREASED default retries
-        'fragment_retries': 15,  # INCREASED fragment retries
+        'retries': settings.get("retries", 5),
+        'fragment_retries': 15,
         'skip_unavailable_fragments': False,
-        'keepvideo': False,
+        'keepvideo': False,  # Changed to False to avoid keeping separate files
         'overwrites': True,
-        
-        # Essential postprocessors
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4'
-        }, {
-            'key': 'FFmpegMetadata',
-            'add_metadata': True,
-        }]
+        'ignoreerrors': True,
+        'prefer_ffmpeg': True,
+        'socket_timeout': 60,
+        'writethumbnail': True,  # Always download thumbnail
+        # Common user agent
+        'http_headers': {
+            'User-Agent': get_platform_user_agent(platform),
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        }
     }
     
-    # Platform-specific enhancements
-    if platform == "Facebook":
-        # ENHANCED: Facebook specific options
+    # YouTube-specific options for better merging
+    if platform == "YouTube":
         ydl_opts.update({
-            'cookiefile': os.path.join(os.path.expanduser("~"), ".fb_cookies.txt"),
-            'socket_timeout': 60,  # Increased timeout
-            'extract_flat': False,
-            'force_generic_extractor': False
+            'merge_output_format': 'mp4',
+            'postprocessors': [
+                {
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4'
+                },
+                {
+                    'key': 'FFmpegMetadata',
+                    'add_metadata': True
+                },
+                {
+                    'key': 'EmbedThumbnail',  # Add thumbnail to video
+                    'already_have_thumbnail': False
+                },
+                {
+                    'key': 'MoveFiles',
+                    'dest_dir': platform_path
+                }
+            ],
+            'postprocessor_args': {
+                'ffmpeg': [
+                    '-c:v', 'libx264',  # Force H.264 codec
+                    '-c:a', 'aac',
+                    '-strict', 'experimental',
+                    '-movflags', '+faststart'
+                ]
+            },
+            # YouTube-specific browser headers
+            'http_headers': {
+                'User-Agent': get_platform_user_agent("YouTube"),
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Referer': 'https://www.youtube.com/',
+                'Origin': 'https://www.youtube.com'
+            }
         })
     
+    # TikTok-specific options
     elif platform == "TikTok":
-        # ENHANCED: TikTok specific options
         ydl_opts.update({
-            'socket_timeout': 60,  # Increased timeout for TikTok
+            'format': 'bv*[vcodec!*=hevc][vcodec!*=h265]+ba/b[vcodec!*=hevc][vcodec!*=h265]/b',
+            'merge_output_format': 'mp4',
+            'postprocessors': [
+                {
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4'
+                },
+                {
+                    # Force conversion to H.264 for all TikTok videos
+                    'key': 'FFmpegVideoRemuxer',
+                    'preferedformat': 'mp4'
+                },
+                {
+                    'key': 'FFmpegMetadata',
+                    'add_metadata': True
+                }
+            ],
+            'postprocessor_args': {
+                'ffmpeg': [
+                    '-c:v', 'libx264',  # Force H.264 codec
+                    '-c:a', 'aac',
+                    '-strict', 'experimental',
+                    '-movflags', '+faststart'
+                ]
+            },
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://www.tiktok.com/'
+                'User-Agent': get_platform_user_agent("TikTok"),
+                'Referer': 'https://www.tiktok.com/',
+                'Origin': 'https://www.tiktok.com'
             }
         })
     
+    # Facebook-specific options
+    elif platform == "Facebook":
+        ydl_opts.update({
+            'format': 'best[ext=mp4]/dash_sd_src/dash_hd_src/hd_src/sd_src',
+            'merge_output_format': 'mp4',
+            'http_headers': {
+                'User-Agent': get_platform_user_agent("Facebook"),
+                'Referer': 'https://www.facebook.com/',
+                'Origin': 'https://www.facebook.com'
+            }
+        })
+    
+    # Instagram-specific options
     elif platform == "Instagram":
-        # ENHANCED: Instagram specific options
         ydl_opts.update({
-            'cookiefile': os.path.join(os.path.expanduser("~"), ".ig_cookies.txt"),
-            'socket_timeout': 60,
+            'format': 'best/dash_hd/dash_sd',
+            'merge_output_format': 'mp4',
+            'extract_flat': False,
+            'writeinfojson': True,  # Always save info for Instagram
+            'postprocessors': [
+                {
+                    'key': 'FFmpegMetadata',
+                    'add_metadata': True
+                },
+                {
+                    'key': 'EmbedThumbnail',
+                    'already_have_thumbnail': False
+                }
+            ],
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://www.instagram.com/'
-            }
+                'User-Agent': get_platform_user_agent("Instagram"),
+                'Referer': 'https://www.instagram.com/',
+                'Origin': 'https://www.instagram.com'
+            },
+            'cookiefile': os.path.join(os.path.expanduser("~"), ".ig_cookies.txt")
         })
+        
+        # Try to find or create Instagram cookie file
+        cookie_file = os.path.join(os.path.expanduser("~"), ".ig_cookies.txt")
+        if not os.path.exists(cookie_file):
+            # Create empty cookie file
+            with open(cookie_file, 'w') as f:
+                f.write("# Instagram cookies file\n")
     
-    # Add subtitle processors if enabled
-    if settings.get("write_subtitles", False):
-        if settings.get("embed_subtitles", False):
-            ydl_opts['postprocessors'].append({
-                'key': 'FFmpegEmbedSubtitle',
-                'already_have_subtitle': False,
-            })
-        if settings.get("write_auto_subtitles", False):
-            ydl_opts['writeautomaticsub'] = True
-    
-    # Add ffmpeg location if needed for certain platforms
-    if hasattr(sys, 'frozen'):  # Check if running as exe
-        ffmpeg_location = os.path.join(os.path.dirname(sys.executable), 'ffmpeg')
-        if os.path.exists(ffmpeg_location):
-            ydl_opts['ffmpeg_location'] = ffmpeg_location
-    
-    # Get platform-specific FFmpeg parameters
-    ydl_opts['postprocessor_args'] = get_ffmpeg_params(platform)
-    
-    # Add aria2c support with thread count
+    # Add aria2c support with thread count if enabled
     if thread_count > 1:
         ydl_opts['external_downloader'] = 'aria2c'
         ydl_opts['external_downloader_args'] = [
@@ -464,72 +716,58 @@ def download_video(url, download_path, quality, thread_count, row_id):
             '--auto-file-renaming=false'
         ]
     
-    try:
-        # ENHANCED: Try with multiple attempts and different formats if needed
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    
-                    # Pre-update the table with available metadata
-                    if info:
-                        title = clean_filename(info.get('title', 'Unknown Title'))
-                        author = info.get('uploader', info.get('channel', 'Unknown Author'))
-                        duration = info.get('duration')
-                        filesize = info.get('filesize')
-                        
-                        # Update the metadata in the table before download starts
-                        root.after(0, lambda: update_video_metadata(row_id, title, author, duration, filesize))
-                    
-                    # Start actual download
-                    ydl.download([url])
-                
-                # Download successful, break the retry loop
-                break
-            
-            except Exception as e:
-                error_msg = str(e)
-                print(f"Download attempt {attempt+1} error: {error_msg}")
-                
-                # If this is the last attempt, raise the exception to be caught by the outer try-except
-                if attempt == max_attempts - 1:
-                    raise
-                
-                # For Facebook connection issues, wait and retry
-                if platform == "Facebook" and "Requested format is not available" in error_msg:
-                    # Try a different format option
-                    if attempt == 0:
-                        ydl_opts['format'] = 'hd_src/sd_src'
-                    else:
-                        ydl_opts['format'] = 'sd_src'
-                    time.sleep(2)  # Wait before retry
-                
-                # For TikTok connection issues
-                elif platform == "TikTok" and ("Connection" in error_msg or "aborted" in error_msg):
-                    # Try with different headers and options
-                    ydl_opts['http_headers']['User-Agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
-                    time.sleep(3)  # Longer wait for TikTok
-                
-                # For Instagram format issues
-                elif platform == "Instagram" and "Requested format is not available" in error_msg:
-                    # Try different format options for Instagram
-                    ydl_opts['format'] = 'standard/high/low'
-                    time.sleep(2)
-        
-        # Mark download as complete in table and update header
-        root.after(0, lambda: update_video_status(row_id, "Completed", "Done"))
-        root.after(0, lambda: update_header_message(f"Download Completed: {info.get('title', 'Video')}", "#00FF00"))
-        return True
+    # Debug output
+    print(f"Downloading {platform} video with format: {format_option}")
+    print(f"Output template: {output_template}")
     
+    try:
+        # Enhanced download process with multiple attempts
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # First try to extract info
+            try:
+                info = ydl.extract_info(url, download=False)
+                
+                # Pre-update the table with available metadata
+                if info and isinstance(info, dict):
+                    title = clean_filename(info.get('title', 'Unknown Title'))
+                    author = info.get('uploader', info.get('channel', 'Unknown Author'))
+                    duration = info.get('duration')
+                    filesize = info.get('filesize')
+                    
+                    # Update metadata in the table
+                    root.after(0, lambda: update_video_metadata(row_id, title, author, duration, filesize))
+                    
+                    # Debug output
+                    print(f"Video info: Title: {title}, Author: {author}, Duration: {duration}, Size: {filesize}")
+            except Exception as e:
+                print(f"Info extraction error: {str(e)}")
+                # Continue with download even if metadata extraction fails
+            
+            # Start actual download
+            ydl.download([url])
+        
+        # After download, verify the file exists
+        video_path = get_video_output_path(row_id)
+        if video_path and os.path.exists(video_path):
+            print(f"Download successful, file saved at: {video_path}")
+            # Mark download as complete
+            root.after(0, lambda: update_video_status(row_id, "Completed", "Done"))
+            root.after(0, lambda: update_header_message(f"Download Completed: {os.path.basename(video_path)}", "#00FF00"))
+            return True
+        else:
+            print("Download might have failed, file not found at expected location")
+            root.after(0, lambda: update_video_status(row_id, "Failed", "File not found"))
+            root.after(0, lambda: update_header_message("Download failed: File not found", "#FF0000"))
+            return False
+            
     except Exception as e:
         error_msg = str(e)
         print(f"Download error: {error_msg}")
         root.after(0, lambda: update_video_status(row_id, "Failed", error_msg[:20] + "..."))
         root.after(0, lambda: update_header_message(f"Download Failed: {error_msg[:50]}", "#FF0000"))
         return False
-
-# Folder Selection Function
+        
+      # Folder Selection Function
 def browse_folder():
     folder_selected = filedialog.askdirectory()
     if folder_selected:
@@ -562,6 +800,9 @@ def add_url():
         url_window.geometry("500x150")
         url_window.resizable(False, False)
         url_window.grab_set()  # Make the window modal
+        
+        # Center window relative to root
+        center_window(url_window, 500, 150)
         
         ctk.CTkLabel(url_window, text="Enter Video URL:").pack(pady=(15, 5))
         
@@ -615,7 +856,7 @@ def update_link_count():
     count = len(video_table.get_children())
     link_count_label.configure(text=f"Link Count: {count}")
 
-# Function to pause all downloads
+# Function to pause all downloads - FIXED
 def pause_all_downloads():
     global paused
     paused = True
@@ -624,10 +865,16 @@ def pause_all_downloads():
     # Update status for all active downloads
     for item_id in video_table.get_children():
         values = video_table.item(item_id, "values")
-        if "Downloading" in values[2]:
+        status = values[2] if len(values) > 2 else ""
+        
+        # Only change status for currently downloading items
+        if "Downloading" in status:
+            # Preserve the URL in tags when marking as paused
+            url = values[1] if len(values) > 1 else None
             update_video_status(item_id, "Paused", "")
+            video_table.item(item_id, tags=("paused", url))
 
-# Function to resume all downloads
+# Function to resume all downloads - FIXED
 def resume_all_downloads():
     global paused
     paused = False
@@ -636,14 +883,19 @@ def resume_all_downloads():
     # Update status for all paused downloads
     for item_id in video_table.get_children():
         values = video_table.item(item_id, "values")
-        if values[2] == "Paused":
+        status = values[2] if len(values) > 2 else ""
+        
+        if status == "Paused":
+            # Preserve the URL in tags when updating status
+            url = values[1] if len(values) > 1 else None
             update_video_status(item_id, "Pending", "")
+            video_table.item(item_id, tags=("url", url))
     
     # Restart downloads if they were active before
     if downloading:
         start_download()
 
-# ENHANCED: Reset URL table and stop ongoing downloads
+# Reset URL table and stop ongoing downloads
 def reset_urls():
     global downloading, download_queue, progress_info
     
@@ -769,6 +1021,10 @@ def download_worker(path, quality, thread_count):
             time.sleep(1)  # Wait before checking again
             continue
             
+        # Check if downloading flag is still set
+        if not downloading:
+            break  # Exit if downloads have been stopped
+            
         try:
             # Get next URL from queue
             row_id, url = download_queue.pop(0)
@@ -831,14 +1087,59 @@ def set_downloading_false():
 
 # Function to install YouTube packages
 def install_yt_packages():
-    messagebox.showinfo("Install YouTube Packages", 
-                       "This will install additional packages needed for YouTube downloads.")
-    # Here you would implement the actual installation logic
-    # For example, calling pip or showing a more detailed installation dialog
-    
-    # Placeholder implementation
-    messagebox.showinfo("Installation Complete", 
-                       "YouTube packages have been installed successfully!")
+    try:
+        # Create a popup window with options
+        install_window = ctk.CTkToplevel(root)
+        install_window.title("Install YouTube Packages")
+        install_window.geometry("500x350")
+        install_window.resizable(False, False)
+        install_window.grab_set()
+        
+        # Center window relative to root
+        center_window(install_window, 500, 350)
+        
+        ctk.CTkLabel(install_window, text="Install Additional Packages", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 5))
+        
+        info_text = """The video downloader requires additional packages to function correctly with YouTube.
+        
+This will install/update the following packages:
+- yt-dlp (main downloader)
+- ffmpeg (video processor)
+- aria2c (multi-threaded downloader)
+
+Select an installation method below:"""
+        
+        info_label = ctk.CTkLabel(install_window, text=info_text, wraplength=450, justify="left")
+        info_label.pack(pady=15, padx=20)
+        
+        # Installation methods
+        def install_pip():
+            install_window.destroy()
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"])
+                messagebox.showinfo("Installation", "YouTube packages installed successfully via pip!")
+            except Exception as e:
+                messagebox.showerror("Installation Error", f"Failed to install packages: {str(e)}")
+        
+        def open_instructions():
+            install_window.destroy()
+            webbrowser.open("https://github.com/yt-dlp/yt-dlp/wiki/Installation")
+        
+        # Buttons for installation methods
+        button_frame = ctk.CTkFrame(install_window, fg_color="transparent")
+        button_frame.pack(pady=20)
+        
+        ctk.CTkButton(button_frame, text="Install with pip", command=install_pip, 
+                    width=200, height=40, fg_color="#2ecc71", hover_color="#27ae60").pack(pady=10)
+        
+        ctk.CTkButton(button_frame, text="Open Installation Instructions", command=open_instructions,
+                    width=200, height=40, fg_color="#3498db", hover_color="#2980b9").pack(pady=10)
+        
+        ctk.CTkButton(button_frame, text="Cancel", command=install_window.destroy,
+                    width=200, height=40, fg_color="#e74c3c", hover_color="#c0392b").pack(pady=10)
+        
+    except Exception as e:
+        messagebox.showerror("Error", f"Error opening installation window: {str(e)}")
 
 # Function to open Aziz YouTube channel
 def open_youtube_channel():
@@ -848,71 +1149,673 @@ def open_youtube_channel():
 def open_facebook_page():
     webbrowser.open("https://www.facebook.com/princeaziz011")
 
-# New combined settings function that replaces both basic and advanced settings
+# Function to check for updates
+def check_for_updates():
+    try:
+        # Show checking message
+        update_header_message("Checking for updates...", "#2980B9")
+        
+        # Fetch the latest script from GitHub
+        response = requests.get(UPDATE_URL, timeout=10)
+        
+        if response.status_code == 200:
+            # Extract version from the fetched script
+            script_content = response.text
+            latest_version_match = re.search(r'VERSION\s*=\s*["\']([\d\.]+)["\']', script_content)
+            
+            if latest_version_match:
+                latest_version = latest_version_match.group(1)
+                
+                # Compare versions
+                if latest_version > VERSION:
+                    # New version available
+                    update_header_message(f"New version {latest_version} available!", "#2ECC71")
+                    
+                    # Ask user if they want to update
+                    if messagebox.askyesno("Update Available", 
+                                         f"A new version ({latest_version}) is available. Your current version is {VERSION}.\n\nWould you like to update now?"):
+                        # Update the script
+                        try:
+                            # Get the path to the current script
+                            if hasattr(sys, 'frozen'):
+                                # If running as executable
+                                script_path = sys.executable
+                                messagebox.showinfo("Update Error", 
+                                                 "Automatic updates are not supported for the executable version.\n\nPlease download the latest version manually from the GitHub repository.")
+                                return
+                            else:
+                                # If running as script
+                                script_path = sys.argv[0]
+                                
+                                # Create backup
+                                backup_path = script_path + ".backup"
+                                shutil.copy2(script_path, backup_path)
+                                
+                                # Write the new version
+                                with open(script_path, 'w', encoding='utf-8') as f:
+                                    f.write(script_content)
+                                
+                                # Show success message
+                                if messagebox.askyesno("Update Successful", 
+                                                    f"The application has been updated to version {latest_version}.\n\nThe application needs to restart to apply the update. Restart now?"):
+                                    # Restart the application
+                                    python = sys.executable
+                                    os.execl(python, python, *sys.argv)
+                        except Exception as e:
+                            messagebox.showerror("Update Error", f"Failed to update: {str(e)}")
+                else:
+                    # Already up to date
+                    update_header_message("You have the latest version!", "#2ECC71")
+                    messagebox.showinfo("Up to Date", f"You are already running the latest version ({VERSION}).")
+            else:
+                # Couldn't find version in script
+                update_header_message("Update check failed: Version not found", "#E74C3C")
+                messagebox.showwarning("Update Check Failed", "Couldn't determine the latest version from the repository.")
+        else:
+            # Failed to fetch script
+            update_header_message("Update check failed: Couldn't connect to GitHub", "#E74C3C")
+            messagebox.showwarning("Update Check Failed", f"Failed to fetch update information. Status code: {response.status_code}")
+    except Exception as e:
+        # Error occurred
+        update_header_message(f"Update check error: {str(e)[:50]}", "#E74C3C")
+        messagebox.showerror("Update Error", f"An error occurred while checking for updates:\n\n{str(e)}")
+
+# Global variables to store icon references (to prevent garbage collection)
+menu_icons = {}
+
+# Load menu icons function
+def load_menu_icons():
+    global menu_icons
+    
+    try:
+        # Define icon paths
+        icon_paths = {
+            "remove": "E:\\Remove From List.png",
+            "delete": "E:\\Delete Video.png",
+            "play": "E:\\Play Video.png",
+            "folder": "E:\\Open Folder.png",
+            "copy": "E:\\Copy Url.png"
+        }
+        
+        # Load each icon
+        for key, path in icon_paths.items():
+            if os.path.exists(path):
+                # Load and resize the image to appropriate menu size (16x16 or 20x20)
+                img = Image.open(path)
+                img = img.resize((16, 16), Image.Resampling.LANCZOS)
+                menu_icons[key] = ImageTk.PhotoImage(img)
+            else:
+                print(f"Warning: Icon not found at {path}")
+    except Exception as e:
+        print(f"Error loading menu icons: {str(e)}")
+
+# Function to handle right-click context menu events
+def show_context_menu(event):
+    global right_click_menu, context_menu_row, video_table, menu_icons
+    
+    # Only show context menu if video_table exists
+    if not video_table:
+        return
+    
+    # Load icons if not already loaded
+    if not menu_icons:
+        load_menu_icons()
+    
+    # Get the item that was clicked
+    try:
+        # Identify the row that was clicked
+        row_id = video_table.identify_row(event.y)
+        if not row_id:
+            return  # No row was clicked
+            
+        # Select the row that was clicked
+        video_table.selection_set(row_id)
+        
+        # Store the row id for later use
+        context_menu_row = row_id
+        
+        # Get the status and URL of the row
+        values = video_table.item(row_id, "values")
+        status = values[2] if len(values) > 2 else ""
+        url = values[1] if len(values) > 1 else ""
+        
+        # Create a new context menu with enhanced styling
+        right_click_menu = tk.Menu(root, tearoff=0, font=('Segoe UI', 11), 
+                                  relief="flat", borderwidth=2,
+                                  activebackground="#4a86e8", 
+                                  activeforeground="white",  # White text on hover
+                                  background="#ffffff")
+        
+        # Configure menu padding and size
+        right_click_menu.config(bd=0)
+        
+        # FIXED COLORS: Using consistent blue hover with white text for better contrast
+        hover_bg = "#2980B9"      # Consistent dark blue background on hover
+        hover_fg = "#FFFFFF"      # White text on hover for maximum contrast
+        
+        # Add menu items based on status in the specified order
+        # 1. Remove From List
+        right_click_menu.add_command(
+            label="Remove From List", 
+            command=remove_from_list,
+            font=('Segoe UI', 11),
+            background="#ffffff",
+            foreground="#000000",           # Black text normally
+            activebackground=hover_bg,      # Blue when hovering
+            activeforeground=hover_fg,      # White text when hovering
+            image=menu_icons.get("remove"),
+            compound=tk.LEFT)
+        
+        # 2. Delete Video (only if completed)
+        if "Completed" in status:
+            right_click_menu.add_command(
+                label="Delete Video", 
+                command=delete_video,
+                font=('Segoe UI', 11),
+                background="#ffffff",
+                foreground="#000000",
+                activebackground=hover_bg,
+                activeforeground=hover_fg,
+                image=menu_icons.get("delete"),
+                compound=tk.LEFT)
+        
+        # 3. Play Video (only if completed)
+        if "Completed" in status:
+            right_click_menu.add_command(
+                label="Play Video", 
+                command=play_video,
+                font=('Segoe UI', 11),
+                background="#ffffff",
+                foreground="#000000",
+                activebackground=hover_bg,
+                activeforeground=hover_fg,
+                image=menu_icons.get("play"),
+                compound=tk.LEFT)
+            
+            # 4. Open Folder (only if completed)
+            right_click_menu.add_command(
+                label="Open Folder", 
+                command=open_video_folder,
+                font=('Segoe UI', 11),
+                background="#ffffff",
+                foreground="#000000",
+                activebackground=hover_bg,
+                activeforeground=hover_fg,
+                image=menu_icons.get("folder"),
+                compound=tk.LEFT)
+        
+        # 5. Copy URL (always available)
+        right_click_menu.add_command(
+            label="Copy URL", 
+            command=copy_video_url,
+            font=('Segoe UI', 11),
+            background="#ffffff",
+            foreground="#000000",
+            activebackground=hover_bg,
+            activeforeground=hover_fg,
+            image=menu_icons.get("copy"),
+            compound=tk.LEFT)
+        
+        # Add "Retry Download" option if download failed
+        if "Failed" in status:
+            right_click_menu.add_separator()
+            # We don't have a retry icon, so we'll reuse another icon or skip the image
+            retry_icon = menu_icons.get("play")  # Reuse play icon or could use None
+            right_click_menu.add_command(
+                label="Retry Download", 
+                command=retry_download,
+                font=('Segoe UI', 11, 'bold'),
+                background="#ffffff",
+                foreground="#000000",
+                activebackground=hover_bg,
+                activeforeground=hover_fg,
+                image=retry_icon,
+                compound=tk.LEFT)
+        
+        # Show the context menu
+        right_click_menu.tk_popup(event.x_root, event.y_root)
+    except Exception as e:
+        print(f"Error showing context menu: {str(e)}")
+        if right_click_menu:
+            right_click_menu.destroy()
+
+# Enhanced get_video_output_path function to handle more cases
+def get_video_output_path(row_id):
+    """Get the expected output path for a video based on its URL and title with improved platform handling"""
+    try:
+        if not video_table or not row_id:
+            return None
+
+        # Get the values from the table row
+        values = video_table.item(row_id, "values")
+        title = values[3] if len(values) > 3 else "Unknown"
+        
+        # Extract URL with better error handling
+        url = None
+        
+        # First try to get URL from values
+        if len(values) > 1 and values[1] and values[1] != "None" and values[1] != "Unknown":
+            url = values[1]
+        
+        # If not found in values, try to get from tags
+        if not url or url == "":
+            tags = video_table.item(row_id, "tags")
+            for tag in tags:
+                if tag != "url" and tag != "completed" and tag != "failed" and tag != "editing":
+                    url = tag
+                    break
+        
+        # If still no URL, we can't proceed
+        if not url:
+            print(f"Could not find URL for row {row_id}")
+            return None
+            
+        # Determine platform with improved detection
+        platform = detect_platform(url)
+        print(f"Platform detected for URL {url}: {platform}")
+        
+        # Get download path
+        download_dir = download_path.get() or settings.get("default_download_path", 
+                                                       os.path.join(os.path.expanduser("~"), "Downloads"))
+        platform_path = os.path.join(download_dir, platform)
+        
+        # Debug message
+        print(f"Looking for video in {platform_path} with title: {title}")
+        
+        # Check if the platform folder exists
+        if not os.path.exists(platform_path):
+            print(f"Platform path does not exist: {platform_path}")
+            return None
+        
+        # First check if we have the direct output file path in progress_info
+        for info_url, info in progress_info.items():
+            if url == info_url and 'output_file' in info and info['output_file']:
+                if os.path.exists(info['output_file']):
+                    print(f"Found exact file via progress_info: {info['output_file']}")
+                    return info['output_file']
+        
+        # Clean title for file matching
+        simplified_title = clean_filename(title.lower())
+        
+        # Search for files with title or URL components in the name
+        matching_files = []
+        
+        # List all video files in the platform directory
+        if os.path.exists(platform_path):
+            for file in os.listdir(platform_path):
+                file_lower = file.lower()
+                if file_lower.endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov')):
+                    # Match by title
+                    if simplified_title != "unknown" and simplified_title in file_lower:
+                        matching_files.append((file, 10))  # Higher priority for title match
+                        continue
+                    
+                    # Match by URL components
+                    url_parts = url.split('/')
+                    for part in url_parts:
+                        if len(part) > 5 and part.lower() in file_lower:
+                            matching_files.append((file, 5))  # Medium priority for URL part match
+                            break
+        
+        # If we found matching files, return the highest priority match
+        if matching_files:
+            # Sort by priority (highest first) and then by modification time (newest first)
+            matching_files.sort(key=lambda x: (-x[1], -os.path.getmtime(os.path.join(platform_path, x[0]))))
+            best_match = matching_files[0][0]
+            print(f"Found best matching file: {best_match}")
+            return os.path.join(platform_path, best_match)
+        
+        # If no specific matches, get the most recent video file in the platform folder
+        video_files = []
+        for file in os.listdir(platform_path):
+            if file.lower().endswith(('.mp4', '.webm', '.mkv', '.avi', '.mov')):
+                video_files.append(file)
+                
+        if video_files:
+            # Sort by modification time (newest first)
+            video_files.sort(key=lambda x: os.path.getmtime(os.path.join(platform_path, x)), reverse=True)
+            newest_file = video_files[0]
+            print(f"Found newest video file as last resort: {newest_file}")
+            return os.path.join(platform_path, newest_file)
+        
+        # If we couldn't find any file, return None
+        print(f"No matching video files found in {platform_path}")
+        return None
+    except Exception as e:
+        print(f"Error getting video path: {str(e)}")
+        return None
+
+# Improved open_video_folder function
+def open_video_folder():
+    global context_menu_row, video_table
+    
+    if not context_menu_row or not video_table:
+        return
+        
+    try:
+        # First try to get status to determine if download is complete
+        values = video_table.item(context_menu_row, "values")
+        status = values[2] if len(values) > 2 else ""
+        
+        # Get the URL from the row
+        url = values[1] if len(values) > 1 else None
+        if not url:
+            tags = video_table.item(context_menu_row, "tags")
+            for tag in tags:
+                if tag != "url" and tag != "completed" and tag != "failed" and tag != "editing":
+                    url = tag
+                    break
+        
+        if not url:
+            messagebox.showwarning("Open Folder Failed", "Could not determine the video URL.")
+            return
+            
+        # Get the platform for this URL
+        platform = detect_platform(url)
+        
+        # Get download directory
+        download_dir = download_path.get() or settings.get("default_download_path", 
+                                                         os.path.join(os.path.expanduser("~"), "Downloads"))
+        # Construct platform folder path
+        platform_path = os.path.join(download_dir, platform)
+        
+        # Check if the platform folder exists - create it if not
+        if not os.path.exists(platform_path):
+            os.makedirs(platform_path)
+        
+        # First attempt: Try to find the specific video file
+        if "Completed" in status:
+            file_path = get_video_output_path(context_menu_row)
+            
+            if file_path and os.path.isfile(file_path):
+                # We found the specific file
+                folder_path = os.path.dirname(file_path)
+                
+                # Check if folder exists
+                if not os.path.exists(folder_path):
+                    folder_path = platform_path  # Fallback to platform folder
+                
+                # Open folder and select the file if possible
+                if sys.platform == "win32":
+                    # On Windows, use explorer to open and select the file
+                    subprocess.run(['explorer', '/select,', file_path])
+                    return
+                else:
+                    # On other platforms, just open the folder
+                    if sys.platform == "darwin":  # macOS
+                        subprocess.call(["open", folder_path])
+                    else:  # Linux
+                        subprocess.call(["xdg-open", folder_path])
+                    return
+        
+        # Second attempt: Just open the platform folder
+        if os.path.exists(platform_path):
+            if sys.platform == "win32":
+                os.startfile(platform_path)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.call(["open", platform_path])
+            else:  # Linux
+                subprocess.call(["xdg-open", platform_path])
+            return
+        
+        # If we get here, both attempts failed
+        messagebox.showwarning("Open Folder", 
+                               f"Opened downloads folder: {download_dir}\nVideos are organized by platform.")
+        
+        # Open the main downloads folder as a last resort
+        if os.path.exists(download_dir):
+            if sys.platform == "win32":
+                os.startfile(download_dir)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.call(["open", download_dir])
+            else:  # Linux
+                subprocess.call(["xdg-open", download_dir])
+            
+    except Exception as e:
+        print(f"Error opening folder: {str(e)}")
+        messagebox.showerror("Open Folder Failed", f"Error opening folder: {str(e)}")
+        
+        # Try to open the downloads folder directly as a last resort
+        try:
+            download_dir = download_path.get() or settings.get("default_download_path", 
+                                                            os.path.join(os.path.expanduser("~"), "Downloads"))
+            if os.path.exists(download_dir):
+                if sys.platform == "win32":
+                    os.startfile(download_dir)
+                elif sys.platform == "darwin":  # macOS
+                    subprocess.call(["open", download_dir])
+                else:  # Linux
+                    subprocess.call(["xdg-open", download_dir])
+        except:
+            pass
+
+# Function to copy video URL to clipboard
+def copy_video_url():
+    global context_menu_row, video_table
+    
+    if not context_menu_row or not video_table:
+        return
+        
+    try:
+        # Get the URL from the table
+        values = video_table.item(context_menu_row, "values")
+        url = values[1] if len(values) > 1 else ""
+        
+        if url:
+            # Copy URL to clipboard
+            pyperclip.copy(url)
+            
+            # Show brief confirmation
+            update_header_message("URL copied to clipboard", "#00FF00")
+        else:
+            messagebox.showwarning("Copy Failed", "Could not find URL to copy.")
+    except Exception as e:
+        print(f"Error copying URL: {str(e)}")
+        messagebox.showerror("Copy Failed", f"Error copying URL: {str(e)}")
+
+# Function to remove a row from the list
+def remove_from_list():
+    global context_menu_row, video_table
+    
+    if not context_menu_row or not video_table:
+        return
+        
+    try:
+        # Remove the row from the table
+        video_table.delete(context_menu_row)
+        
+        # Renumber remaining rows
+        for i, item in enumerate(video_table.get_children(), 1):
+            values = list(video_table.item(item, "values"))
+            values[0] = i  # Update row number
+            video_table.item(item, values=values)
+            
+        # Update link count
+        update_link_count()
+        
+        # Reset context menu row
+        context_menu_row = None
+    except Exception as e:
+        print(f"Error removing from list: {str(e)}")
+
+# Function to delete a video
+def delete_video():
+    global context_menu_row, video_table
+    
+    if not context_menu_row or not video_table:
+        return
+        
+    try:
+        # Get the path to the video
+        video_path = get_video_output_path(context_menu_row)
+        
+        if video_path and os.path.exists(video_path):
+            # Confirm deletion
+            if messagebox.askyesno("Delete Video", 
+                                 f"Are you sure you want to delete this video?\n\n{os.path.basename(video_path)}"):
+                # Delete the video
+                os.remove(video_path)
+                messagebox.showinfo("Video Deleted", "The video has been deleted successfully.")
+                
+                # Update status to reflect deletion
+                values = list(video_table.item(context_menu_row, "values"))
+                values[2] = "Deleted"  # Update status
+                video_table.item(context_menu_row, values=values)
+        else:
+            messagebox.showwarning("Delete Failed", "Could not find the video file to delete.")
+            
+        # Reset context menu row
+        context_menu_row = None
+    except Exception as e:
+        print(f"Error deleting video: {str(e)}")
+        messagebox.showerror("Delete Failed", f"Error deleting video: {str(e)}")
+
+# Function to play a video
+def play_video():
+    global context_menu_row, video_table
+    
+    if not context_menu_row or not video_table:
+        return
+        
+    try:
+        # Get the path to the video
+        video_path = get_video_output_path(context_menu_row)
+        print(f"Attempting to play video at: {video_path}")
+        
+        if video_path and os.path.exists(video_path):
+            print(f"Video file exists, opening with default player")
+            # Open the video with the default player
+            if sys.platform == "win32":
+                os.startfile(video_path)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.call(["open", video_path])
+            else:  # Linux
+                subprocess.call(["xdg-open", video_path])
+        else:
+            # If not found by the function, let's try a more direct approach for debugging
+            values = video_table.item(context_menu_row, "values")
+            title = values[3] if len(values) > 3 else "Unknown"
+            url = values[1] if len(values) > 1 else None
+            
+            platform = detect_platform(url) if url else "Unknown"
+            download_dir = download_path.get() or settings.get("default_download_path", 
+                                                              os.path.join(os.path.expanduser("~"), "Downloads"))
+            platform_path = os.path.join(download_dir, platform)
+            
+            messagebox.showwarning("Play Failed", 
+                                  f"Could not find the video file to play.\n\nLooking in: {platform_path}\n\nTry using 'Open Folder' and playing the file manually.")
+            
+    except Exception as e:
+        print(f"Error playing video: {str(e)}")
+        messagebox.showerror("Play Failed", f"Error playing video: {str(e)}")
+
+# Function to retry a failed download
+def retry_download():
+    global context_menu_row, video_table
+    
+    if not context_menu_row or not video_table:
+        return
+        
+    try:
+        # Get the URL from the row
+        tags = video_table.item(context_menu_row, "tags")
+        url = None
+        for tag in tags:
+            if tag != "url" and tag != "failed":
+                url = tag
+                break
+                
+        if not url:
+            messagebox.showwarning("Retry Failed", "Could not find the URL to retry.")
+            return
+            
+        # Update status to pending
+        values = list(video_table.item(context_menu_row, "values"))
+        values[2] = "Pending"  # Update status
+        video_table.item(context_menu_row, values=values, tags=("url", url))
+        
+        # Add to download queue if downloading is active
+        if downloading:
+            download_queue.append((context_menu_row, url))
+        else:
+            # Start download if not already downloading
+            path = download_path.get().strip()
+            if path:
+                quality = quality_var.get()
+                thread_count = int(thread_count_var.get())
+                t = threading.Thread(target=lambda: download_video(url, path, quality, thread_count, context_menu_row), daemon=True)
+                t.start()
+            
+        # Reset context menu row
+        context_menu_row = None
+    except Exception as e:
+        print(f"Error retrying download: {str(e)}")
+        messagebox.showerror("Retry Failed", f"Error retrying download: {str(e)}")
+
+# New combined settings function with REDUCED SIZE
 def show_combined_settings():
     global settings
     
     settings_window = ctk.CTkToplevel(root)
     settings_window.title("Settings")
-    settings_window.geometry("600x700")  # Make it larger to fit all settings
+    settings_window.geometry("500x580")  # REDUCED size from 600x700
     settings_window.resizable(False, False)
     settings_window.grab_set()
     
+    # Center window relative to root
+    center_window(settings_window, 500, 580)
+    
     # Create a tabview to separate basic and advanced settings
     tab_view = ctk.CTkTabview(settings_window)
-    tab_view.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+    tab_view.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)  # Reduced padding
     
     # Create tabs
     basic_tab = tab_view.add("Basic Settings")
     advanced_tab = tab_view.add("Advanced Settings")
     
-    # === BASIC SETTINGS TAB ===
+    # === BASIC SETTINGS TAB - MORE COMPACT ===
     
     # Main content area for basic tab
     basic_area = ctk.CTkScrollableFrame(basic_tab)
-    basic_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    basic_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)  # Reduced padding
     
-    # Title for basic settings
-    title_frame = ctk.CTkFrame(basic_area, fg_color="transparent")
-    title_frame.pack(fill=tk.X, pady=(0, 20))
-    
-    # Add gear icon and title
-    icon_label = ctk.CTkLabel(title_frame, text="⚙️", font=ctk.CTkFont(size=24))
-    icon_label.pack(side=tk.LEFT, padx=(90, 10))
-    
-    title_label = ctk.CTkLabel(title_frame, text="Basic Settings", font=ctk.CTkFont(size=20, weight="bold"))
-    title_label.pack(side=tk.LEFT)
+    # Title for basic settings - More compact
+    title_label = ctk.CTkLabel(basic_area, text="⚙️ Basic Settings", 
+                              font=ctk.CTkFont(size=18, weight="bold"))
+    title_label.pack(anchor=tk.CENTER, pady=(0, 15))
     
     # Video Backup Option
     backup_var = tk.BooleanVar(value=settings.get("create_backup", False))
     backup_check = ctk.CTkCheckBox(basic_area, text="Save Video Backups (JSON, Description)",
                                    variable=backup_var)
-    backup_check.pack(anchor=tk.W, pady=10)
+    backup_check.pack(anchor=tk.W, pady=5)  # Reduced padding
     
     # Subtitle Options Section
-    subtitle_label = ctk.CTkLabel(basic_area, text="Save Captions Options:", font=ctk.CTkFont(size=14, weight="bold"))
-    subtitle_label.pack(anchor=tk.W, pady=(10, 5))
+    subtitle_label = ctk.CTkLabel(basic_area, text="Save Captions Options:", 
+                                font=ctk.CTkFont(size=14, weight="bold"))
+    subtitle_label.pack(anchor=tk.W, pady=(5, 2))  # Reduced padding
     
-    # Subtitles Options
+    # Subtitles Options - More compact 
     subtitles_var = tk.BooleanVar(value=settings.get("write_subtitles", False))
     embed_subtitles_var = tk.BooleanVar(value=settings.get("embed_subtitles", False))
     auto_subtitles_var = tk.BooleanVar(value=settings.get("write_auto_subtitles", False))
     
     subtitles_check = ctk.CTkCheckBox(basic_area, text="Download as Separate SRT File",
                                      variable=subtitles_var)
-    subtitles_check.pack(anchor=tk.W, padx=20, pady=5)
+    subtitles_check.pack(anchor=tk.W, padx=15, pady=2)  # Reduced padding
     
     embed_subtitles_check = ctk.CTkCheckBox(basic_area, text="Embed Inside Video",
                                            variable=embed_subtitles_var)
-    embed_subtitles_check.pack(anchor=tk.W, padx=20, pady=5)
+    embed_subtitles_check.pack(anchor=tk.W, padx=15, pady=2)  # Reduced padding
     
     auto_subtitles_check = ctk.CTkCheckBox(basic_area, text="Include Auto-Generated Captions",
                                           variable=auto_subtitles_var)
-    auto_subtitles_check.pack(anchor=tk.W, padx=20, pady=5)
+    auto_subtitles_check.pack(anchor=tk.W, padx=15, pady=2)  # Reduced padding
     
     # File naming options section
-    naming_label = ctk.CTkLabel(basic_area, text="Save Videos With:", font=ctk.CTkFont(size=14, weight="bold"))
-    naming_label.pack(anchor=tk.W, pady=(20, 5))
+    naming_label = ctk.CTkLabel(basic_area, text="Save Videos With:", 
+                              font=ctk.CTkFont(size=14, weight="bold"))
+    naming_label.pack(anchor=tk.W, pady=(10, 2))  # Reduced padding
     
     # File naming options
     original_title_var = tk.BooleanVar(value=settings.get("use_original_title", True))
@@ -920,42 +1823,37 @@ def show_combined_settings():
     
     original_title_check = ctk.CTkCheckBox(basic_area, text="Original Title",
                                           variable=original_title_var)
-    original_title_check.pack(anchor=tk.W, padx=20, pady=5)
+    original_title_check.pack(anchor=tk.W, padx=15, pady=2)  # Reduced padding
     
     tags_check = ctk.CTkCheckBox(basic_area, text="Include Tags/Hashtags",
                                 variable=tags_var)
-    tags_check.pack(anchor=tk.W, padx=20, pady=5)
+    tags_check.pack(anchor=tk.W, padx=15, pady=2)  # Reduced padding
     
     # Auto-paste Option
     autopaste_var = tk.BooleanVar(value=settings.get("auto_paste", True))
     autopaste_check = ctk.CTkCheckBox(basic_area, text="Auto-paste URL from Clipboard",
                                      variable=autopaste_var)
-    autopaste_check.pack(anchor=tk.W, pady=10)
+    autopaste_check.pack(anchor=tk.W, pady=5)  # Reduced padding
     
-    # === ADVANCED SETTINGS TAB ===
+    # === ADVANCED SETTINGS TAB - MORE COMPACT ===
     
     # Main content area for advanced tab
     adv_area = ctk.CTkScrollableFrame(advanced_tab)
-    adv_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    adv_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)  # Reduced padding
     
-    # Title for advanced settings
-    adv_title_frame = ctk.CTkFrame(adv_area, fg_color="transparent")
-    adv_title_frame.pack(fill=tk.X, pady=(0, 20))
-    
-    # Add wrench icon and title
-    adv_icon_label = ctk.CTkLabel(adv_title_frame, text="🛠️", font=ctk.CTkFont(size=24))
-    adv_icon_label.pack(side=tk.LEFT, padx=(90, 10))
-    
-    adv_title_label = ctk.CTkLabel(adv_title_frame, text="Advanced Settings", font=ctk.CTkFont(size=20, weight="bold"))
-    adv_title_label.pack(side=tk.LEFT)
+    # Title for advanced settings - More compact
+    adv_title_label = ctk.CTkLabel(adv_area, text="🛠️ Advanced Settings", 
+                                 font=ctk.CTkFont(size=18, weight="bold"))
+    adv_title_label.pack(anchor=tk.CENTER, pady=(0, 15))
     
     # Application Theme Section
-    theme_label = ctk.CTkLabel(adv_area, text="Application Theme:", font=ctk.CTkFont(size=14, weight="bold"))
-    theme_label.pack(anchor=tk.W, pady=(10, 5))
+    theme_label = ctk.CTkLabel(adv_area, text="Application Theme:", 
+                             font=ctk.CTkFont(size=14, weight="bold"))
+    theme_label.pack(anchor=tk.W, pady=(5, 2))  # Reduced padding
     
     theme_var = tk.StringVar(value=settings.get("theme", "light"))
     theme_frame = ctk.CTkFrame(adv_area, fg_color="transparent")
-    theme_frame.pack(fill=tk.X, pady=(0, 10))
+    theme_frame.pack(fill=tk.X, pady=(0, 5))  # Reduced padding
     
     light_radio = ctk.CTkRadioButton(theme_frame, text="Light Mode", variable=theme_var, value="light")
     light_radio.pack(side=tk.LEFT, padx=(0, 20))
@@ -964,8 +1862,9 @@ def show_combined_settings():
     dark_radio.pack(side=tk.LEFT)
     
     # Cache Management Section
-    cache_label = ctk.CTkLabel(adv_area, text="Cache Management:", font=ctk.CTkFont(size=14, weight="bold"))
-    cache_label.pack(anchor=tk.W, pady=(20, 10))
+    cache_label = ctk.CTkLabel(adv_area, text="Cache Management:", 
+                             font=ctk.CTkFont(size=14, weight="bold"))
+    cache_label.pack(anchor=tk.W, pady=(10, 5))  # Reduced padding
     
     def clear_cache():
         cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "yt-dlp")
@@ -983,30 +1882,32 @@ def show_combined_settings():
     
     cache_btn = ctk.CTkButton(adv_area, text="Clear Download Cache", command=clear_cache, 
                              fg_color="#2ecc71", hover_color="#27ae60")
-    cache_btn.pack(anchor=tk.W, pady=5)
+    cache_btn.pack(anchor=tk.W, pady=3)  # Reduced padding
     
     # Multithreading Settings Section
-    threading_label = ctk.CTkLabel(adv_area, text="Multithreading Settings:", font=ctk.CTkFont(size=14, weight="bold"))
-    threading_label.pack(anchor=tk.W, pady=(20, 5))
+    threading_label = ctk.CTkLabel(adv_area, text="Multithreading Settings:", 
+                                 font=ctk.CTkFont(size=14, weight="bold"))
+    threading_label.pack(anchor=tk.W, pady=(10, 2))  # Reduced padding
     
     thread_count_label = ctk.CTkLabel(adv_area, text="Default Thread Count:")
-    thread_count_label.pack(anchor=tk.W, pady=(5, 0))
+    thread_count_label.pack(anchor=tk.W, pady=(2, 0))  # Reduced padding
     
     default_thread_var = tk.StringVar(value=settings.get("default_threads", "4"))
     thread_dropdown = ctk.CTkOptionMenu(adv_area, variable=default_thread_var,
                                       values=["1", "2", "3", "4", "6", "8"],
                                       fg_color="#2ecc71", button_color="#27ae60", button_hover_color="#219652",
                                       width=100)
-    thread_dropdown.pack(anchor=tk.W, pady=5)
+    thread_dropdown.pack(anchor=tk.W, pady=3)  # Reduced padding
     
     # Download Retries Section
-    retries_label = ctk.CTkLabel(adv_area, text="Download Retries:", font=ctk.CTkFont(size=14, weight="bold"))
-    retries_label.pack(anchor=tk.W, pady=(20, 5))
+    retries_label = ctk.CTkLabel(adv_area, text="Download Retries:", 
+                               font=ctk.CTkFont(size=14, weight="bold"))
+    retries_label.pack(anchor=tk.W, pady=(10, 2))  # Reduced padding
     
     retry_var = tk.IntVar(value=settings.get("retries", 3))
     
     retry_frame = ctk.CTkFrame(adv_area, fg_color="transparent")
-    retry_frame.pack(fill=tk.X, pady=5)
+    retry_frame.pack(fill=tk.X, pady=3)  # Reduced padding
     
     retry_slider = ctk.CTkSlider(retry_frame, from_=0, to=10, number_of_steps=10, variable=retry_var)
     retry_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
@@ -1020,9 +1921,9 @@ def show_combined_settings():
     retry_slider.bind("<Motion>", update_retry_label)
     retry_slider.bind("<ButtonRelease-1>", update_retry_label)
     
-    # Buttons at the bottom
-    button_frame = ctk.CTkFrame(settings_window, height=60)
-    button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=20)
+    # Buttons at the bottom - More compact
+    button_frame = ctk.CTkFrame(settings_window, height=50)  # Reduced height
+    button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=15)  # Reduced padding
     
     # Cancel button
     def cancel_settings():
@@ -1034,8 +1935,8 @@ def show_combined_settings():
         command=cancel_settings,
         fg_color="#E74C3C", 
         hover_color="#C0392B",
-        width=120,
-        height=35
+        width=100,  # Reduced width
+        height=32   # Reduced height
     )
     cancel_button.pack(side=tk.LEFT, padx=(0, 10))
     
@@ -1072,8 +1973,8 @@ def show_combined_settings():
         command=save_all_settings,
         fg_color="#2ecc71", 
         hover_color="#27ae60",
-        width=120,
-        height=35
+        width=120,  # Adjusted width
+        height=32   # Reduced height
     )
     save_button.pack(side=tk.RIGHT)
     
@@ -1164,6 +2065,13 @@ def verify_license():
     license_window.geometry("360x280")
     license_window.resizable(False, False)
     license_window.configure(bg="#222222")  # Dark background
+    
+    # Center window on screen
+    screen_width = license_window.winfo_screenwidth()
+    screen_height = license_window.winfo_screenheight()
+    x = (screen_width // 2) - (360 // 2)
+    y = (screen_height // 2) - (280 // 2)
+    license_window.geometry(f"360x280+{x}+{y}")
     
     # Try to set window icon
     try:
@@ -1347,14 +2255,6 @@ def verify_license():
         key_entry.insert(0, cached_license)
         key_entry.config(fg="#FFFFFF")  # White text for actual license
     
-    # Center window on screen
-    license_window.update_idletasks()
-    width = license_window.winfo_width()
-    height = license_window.winfo_height()
-    x = (license_window.winfo_screenwidth() // 2) - (width // 2)
-    y = (license_window.winfo_screenheight() // 2) - (height // 2)
-    license_window.geometry(f"{width}x{height}+{x}+{y}")
-    
     # Focus the window
     license_window.focus_force()
     key_entry.focus_set()
@@ -1527,7 +2427,7 @@ def setup_inline_editing(treeview):
     # Store editor reference on treeview to prevent garbage collection
     treeview.editor = editor
 
-# Main Downloader GUI - MODIFIED with requested changes
+# Main Downloader GUI
 def open_downloader(license_key):
     global root, download_path, folder_entry, download_button, status_label
     global quality_var, thread_count_var, progress_bar, start_bulk_button
@@ -1541,7 +2441,7 @@ def open_downloader(license_key):
     
     root = ctk.CTk()
     root.title("Ultra Fast Video Downloader by Aziz Tech")
-    root.geometry("900x600")  # Reduced height for more compact UI
+    root.geometry("900x600")
     root.resizable(True, True)
     
     # Variables
@@ -1565,9 +2465,11 @@ def open_downloader(license_key):
     menu_bar.add_cascade(label="  Files  ", menu=file_menu)  # Added spaces for padding
     file_menu.add_command(label="Install YT PKGs", command=install_yt_packages)
     
-    # Create Help menu
+    # Create Help menu with Check for Updates
     help_menu = tk.Menu(menu_bar, tearoff=0, font=('Segoe UI', 11))
     menu_bar.add_cascade(label="  Help  ", menu=help_menu)  # Added spaces for padding
+    help_menu.add_command(label="Check for Updates", command=check_for_updates)
+    help_menu.add_separator()
     help_menu.add_command(label="YouTube Channel", command=open_youtube_channel)
     help_menu.add_command(label="Facebook Page", command=open_facebook_page)
     
@@ -1618,7 +2520,7 @@ def open_downloader(license_key):
                                    width=120, height=36, fg_color="#2ecc71", hover_color="#27ae60")
     settings_button.pack(side=tk.LEFT)
     
-    # Folder and Quality Selection Row - MODIFIED to remove Threads button
+    # Folder and Quality Selection Row
     options_row = ctk.CTkFrame(main_frame, fg_color="transparent")
     options_row.pack(fill=tk.X, pady=(10, 10))
     
@@ -1678,11 +2580,11 @@ def open_downloader(license_key):
                              yscrollcommand=vsb.set,
                              xscrollcommand=hsb.set)
     
-    # Force header visibility
+    # Configure column headings
     for col in ("#", "Links", "Status", "Titles", "Author", "Time", "Size"):
         video_table.heading(col, text=col)
     
-    # Create and configure tags for row coloring
+    # NOW we can configure tags AFTER creating the video_table
     video_table.tag_configure("completed", background="#E8F8F5")
     video_table.tag_configure("failed", background="#FADBD8")
     video_table.tag_configure("editing", background="#FEF9E7")  # Highlight for editing
@@ -1694,15 +2596,6 @@ def open_downloader(license_key):
     # Add scrollbars
     vsb.pack(side=tk.RIGHT, fill=tk.Y)
     hsb.pack(side=tk.BOTTOM, fill=tk.X)
-    
-    # Configure column headings
-    video_table.heading("#", text="#", anchor=tk.CENTER)
-    video_table.heading("Links", text="Links", anchor=tk.CENTER)
-    video_table.heading("Status", text="Status", anchor=tk.CENTER)
-    video_table.heading("Titles", text="Titles", anchor=tk.CENTER)
-    video_table.heading("Author", text="Author", anchor=tk.CENTER)
-    video_table.heading("Time", text="Time", anchor=tk.CENTER)
-    video_table.heading("Size", text="Size", anchor=tk.CENTER)
     
     # Configure column widths
     video_table.column("#", width=30, anchor=tk.CENTER)
@@ -1767,6 +2660,9 @@ def open_downloader(license_key):
     # Setup inline editing for the treeview
     setup_inline_editing(video_table)
     
+    # Setup right-click menu for the treeview - ADD CONTEXT MENU
+    video_table.bind("<Button-3>", show_context_menu)
+    
     # Start cloud key verification
     schedule_key_verification(license_key)
     
@@ -1781,6 +2677,13 @@ def open_downloader(license_key):
     # Initialize header with empty message
     update_header_message("")
     
+    # Center the window on the screen
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = (screen_width // 2) - (900 // 2)
+    y = (screen_height // 2) - (600 // 2)
+    root.geometry(f"900x600+{x}+{y}")
+    
     root.mainloop()
 
 # Main execution function
@@ -1789,4 +2692,4 @@ def main():
     verify_license()
 
 if __name__ == "__main__":
-    main()
+    main()  
