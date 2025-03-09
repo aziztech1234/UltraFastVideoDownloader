@@ -9,6 +9,7 @@ import threading
 import customtkinter as ctk
 from PIL import Image, ImageTk
 import urllib.parse
+import urllib.request  # Added for update downloading
 import shutil
 import time
 import pyperclip
@@ -18,14 +19,21 @@ import pickle
 from datetime import timedelta
 import webbrowser
 import subprocess
+import ssl  # Added for secure connections
+import tempfile  # Added for temporary file handling
 
 # Tool version
-VERSION = "2.8.1"  # Updated version number with fixes
+VERSION = "2.8.1"  # Current version number with fixes
 
-# Server URL for License Verification
+# Server URLs
 SERVER_URL = "https://raw.githubusercontent.com/aziztech1234/License-Keys/main/keys.json"
 # GitHub URL for updates
 UPDATE_URL = "https://raw.githubusercontent.com/aziztech1234/UltraFastVideoDownloader/main/downloader.py"
+# Base URL for executable downloads
+EXECUTABLE_BASE_URL = "https://github.com/aziztech1234/UltraFastVideoDownloader/releases/latest/download/"
+
+# Global variable for storing the latest version during update checks
+latest_version = None
 
 # Global variables
 root = None
@@ -50,6 +58,417 @@ active_download_threads = []  # Track active download threads for proper termina
 # Set theme appearance
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("green")
+
+# Function to compare version strings properly
+def version_compare(v1, v2):
+    """
+    Compare two version strings (e.g., "2.8.1" and "2.9.0")
+    Returns:
+    -1 if v1 < v2
+     0 if v1 == v2
+     1 if v1 > v2
+    """
+    def normalize(v):
+        return [int(x) for x in re.sub(r'(\.0+)*$', '', v).split(".")]
+    
+    n1 = normalize(v1)
+    n2 = normalize(v2)
+    
+    for i in range(max(len(n1), len(n2))):
+        v1_part = n1[i] if i < len(n1) else 0
+        v2_part = n2[i] if i < len(n2) else 0
+        
+        if v1_part < v2_part:
+            return -1
+        elif v1_part > v2_part:
+            return 1
+    
+    return 0
+
+# Function to get the appropriate update URL based on the platform
+def get_platform_update_url():
+    """
+    Returns the appropriate download URL for the current platform
+    """
+    if sys.platform == "win32":
+        return EXECUTABLE_BASE_URL + "UltraFastVideoDownloader.exe"
+    elif sys.platform == "darwin":  # macOS
+        return EXECUTABLE_BASE_URL + "UltraFastVideoDownloader.dmg"
+    else:  # Linux or other platforms
+        return EXECUTABLE_BASE_URL + "UltraFastVideoDownloader.AppImage"
+
+# Advanced download update function with progress and cancel option
+def download_update_with_progress(url, target_path, version):
+    """
+    Download update with progress bar and cancel option
+    Returns True if successful, False otherwise
+    """
+    try:
+        # Show downloading message
+        update_header_message("Downloading update...", "#2980B9")
+        
+        # Create a progress window for downloading
+        progress_window = ctk.CTkToplevel(root)
+        progress_window.title("Downloading Update")
+        progress_window.geometry("450x220")
+        progress_window.resizable(False, False)
+        progress_window.grab_set()
+        progress_window.transient(root)
+        
+        # Center the window
+        center_window(progress_window, 450, 220)
+        
+        # Add labels and progress bar
+        header_frame = ctk.CTkFrame(progress_window, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(20, 5))
+        
+        # Title label
+        title_label = ctk.CTkLabel(
+            header_frame, 
+            text="Downloading Update",
+            font=ctk.CTkFont(size=18, weight="bold")
+        )
+        title_label.pack(fill="x", pady=5)
+        
+        # Version info
+        version_frame = ctk.CTkFrame(progress_window, fg_color="transparent")
+        version_frame.pack(fill="x", padx=20, pady=0)
+        
+        version_label = ctk.CTkLabel(
+            version_frame,
+            text=f"Current Version: {VERSION} → New Version: {version}",
+            font=ctk.CTkFont(size=12)
+        )
+        version_label.pack(pady=5)
+        
+        # Progress section
+        progress_frame = ctk.CTkFrame(progress_window, fg_color="transparent")
+        progress_frame.pack(fill="x", padx=20, pady=10)
+        
+        progress = ctk.CTkProgressBar(progress_frame, width=410, height=15)
+        progress.pack(pady=5)
+        progress.set(0)
+        
+        # Status labels
+        status_frame = ctk.CTkFrame(progress_window, fg_color="transparent")
+        status_frame.pack(fill="x", padx=20, pady=0)
+        
+        status_label = ctk.CTkLabel(status_frame, text="Initializing download...", font=ctk.CTkFont(size=12))
+        status_label.pack(anchor="w", pady=2)
+        
+        speed_label = ctk.CTkLabel(status_frame, text="Speed: --", font=ctk.CTkFont(size=12))
+        speed_label.pack(anchor="w", pady=2)
+        
+        # Cancel flag and button
+        cancel_download = [False]
+        
+        # Button frame
+        button_frame = ctk.CTkFrame(progress_window, fg_color="transparent")
+        button_frame.pack(pady=10)
+        
+        # Cancel button
+        def cancel_download_func():
+            cancel_download[0] = True
+            status_label.configure(text="Cancelling download...")
+        
+        cancel_button = ctk.CTkButton(
+            button_frame, 
+            text="Cancel Download", 
+            command=cancel_download_func,
+            fg_color="#E74C3C", 
+            hover_color="#C0392B",
+            width=150,
+            height=32
+        )
+        cancel_button.pack()
+        
+        # Variables for speed calculation
+        download_start_time = time.time()
+        last_bytes = [0]
+        last_time = [time.time()]
+        
+        # Function to update progress
+        def update_progress(count, block_size, total_size):
+            if cancel_download[0]:
+                raise Exception("Download cancelled by user")
+                
+            if total_size > 0:
+                current_time = time.time()
+                bytes_downloaded = count * block_size
+                
+                # Calculate speed
+                time_diff = current_time - last_time[0]
+                if time_diff >= 0.5:  # Update speed every 0.5 seconds
+                    speed = (bytes_downloaded - last_bytes[0]) / time_diff / 1024  # KB/s
+                    
+                    # Update speed label with appropriate units
+                    if speed > 1024:
+                        speed_label.configure(text=f"Speed: {speed/1024:.2f} MB/s")
+                    else:
+                        speed_label.configure(text=f"Speed: {speed:.2f} KB/s")
+                    
+                    # Update for next calculation
+                    last_bytes[0] = bytes_downloaded
+                    last_time[0] = current_time
+                
+                # Update progress bar and percentage
+                percent = min(bytes_downloaded * 100 / total_size, 100)
+                progress.set(percent / 100)
+                
+                # Format display size with appropriate units
+                if total_size > 1024*1024*1024:
+                    size_text = f"{bytes_downloaded/1024/1024/1024:.2f} GB of {total_size/1024/1024/1024:.2f} GB"
+                else:
+                    size_text = f"{bytes_downloaded/1024/1024:.2f} MB of {total_size/1024/1024:.2f} MB"
+                
+                status_label.configure(text=f"Downloaded {size_text} ({percent:.1f}%)")
+                
+                # Update window to show progress changes
+                progress_window.update_idletasks()
+        
+        # Setup SSL context for secure downloads
+        ssl_context = ssl.create_default_context()
+        
+        # Download the file with progress updates
+        filepath, headers = urllib.request.urlretrieve(
+            url, 
+            target_path, 
+            reporthook=update_progress
+        )
+        
+        # Update status
+        status_label.configure(text="Download completed successfully!")
+        speed_label.configure(text=f"Total time: {time.time() - download_start_time:.1f} seconds")
+        progress.set(1.0)
+        
+        # Change Cancel button to Close
+        cancel_button.configure(text="Close", command=progress_window.destroy, 
+                               fg_color="#2ecc71", hover_color="#27ae60")
+        
+        # Auto-close after 2 seconds
+        progress_window.after(2000, progress_window.destroy)
+        
+        return True
+    except Exception as e:
+        print(f"Error downloading update: {str(e)}")
+        if 'progress_window' in locals() and progress_window.winfo_exists():
+            progress_window.destroy()
+            
+        if str(e) == "Download cancelled by user":
+            messagebox.showinfo("Download Cancelled", "Update download was cancelled.")
+        else:
+            messagebox.showerror("Download Error", f"Failed to download the update: {str(e)}")
+        
+        # Clean up any partially downloaded file
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except Exception as e:
+                print(f"Failed to remove partial download: {str(e)}")
+                
+        return False
+
+# Function to create updater script for Windows
+def create_windows_updater(current_exe_path, update_exe_path):
+    """
+    Create a batch script to update the executable on Windows.
+    Returns the path to the created updater script.
+    """
+    try:
+        # Create a temporary batch file
+        updater_path = os.path.join(tempfile.gettempdir(), 'UltraFastVideoUpdater.bat')
+        
+        # The batch script will:
+        # 1. Wait for the current process to end
+        # 2. Copy the new executable over the old one
+        # 3. Run the new executable
+        # 4. Delete itself and the update file
+        
+        updater_script = f'''@echo off
+echo Waiting for application to close...
+timeout /t 2 /nobreak > nul
+:wait_loop
+tasklist | find /i "{os.path.basename(current_exe_path)}" > nul
+if %errorlevel% equ 0 (
+    timeout /t 1 /nobreak > nul
+    goto wait_loop
+)
+echo Updating application...
+copy /y "{update_exe_path}" "{current_exe_path}"
+if %errorlevel% neq 0 (
+    echo Update failed. Please download the new version manually.
+    pause
+    exit /b 1
+)
+echo Starting updated application...
+start "" "{current_exe_path}"
+echo Cleaning up...
+del "{update_exe_path}"
+del "%~f0"
+exit
+'''
+        
+        # Write the updater script
+        with open(updater_path, 'w') as f:
+            f.write(updater_script)
+        
+        return updater_path
+    except Exception as e:
+        print(f"Error creating Windows updater: {str(e)}")
+        return None
+
+# Function to create updater script for macOS
+def create_macos_updater(current_app_path, update_dmg_path):
+    """
+    Create a shell script to update the application on macOS.
+    Returns the path to the created updater script.
+    """
+    try:
+        # Create a temporary shell script
+        updater_path = os.path.join(tempfile.gettempdir(), 'UltraFastVideoUpdater.sh')
+        
+        # The shell script will:
+        # 1. Wait for the current process to end
+        # 2. Mount the DMG
+        # 3. Copy the new app over the old one
+        # 4. Unmount the DMG
+        # 5. Run the new app
+        # 6. Delete itself and the update file
+        
+        updater_script = f'''#!/bin/bash
+echo "Waiting for application to close..."
+sleep 2
+
+# Wait for the app to close
+while pgrep -f "{os.path.basename(current_app_path)}" > /dev/null; do
+    sleep 1
+done
+
+echo "Mounting update disk image..."
+MOUNT_POINT=$(hdiutil attach "{update_dmg_path}" -nobrowse -readonly | tail -n 1 | awk '{{print $3}}')
+
+if [ -z "$MOUNT_POINT" ]; then
+    echo "Failed to mount disk image. Please update manually."
+    exit 1
+fi
+
+echo "Updating application..."
+APP_NAME=$(ls "$MOUNT_POINT" | grep '.app$')
+if [ -z "$APP_NAME" ]; then
+    echo "No application found in disk image. Please update manually."
+    hdiutil detach "$MOUNT_POINT" -force
+    exit 1
+fi
+
+# Remove old app and copy new one
+rm -rf "{current_app_path}"
+cp -R "$MOUNT_POINT/$APP_NAME" "{os.path.dirname(current_app_path)}/"
+
+echo "Unmounting disk image..."
+hdiutil detach "$MOUNT_POINT" -force
+
+echo "Starting updated application..."
+open "{current_app_path}"
+
+echo "Cleaning up..."
+rm "{update_dmg_path}"
+rm "$0"
+exit 0
+'''
+        
+        # Write the updater script
+        with open(updater_path, 'w') as f:
+            f.write(updater_script)
+        
+        # Make the script executable
+        os.chmod(updater_path, 0o755)
+        
+        return updater_path
+    except Exception as e:
+        print(f"Error creating macOS updater: {str(e)}")
+        return None
+
+# Function to create updater script for Linux
+def create_linux_updater(current_app_path, update_appimage_path):
+    """
+    Create a shell script to update the application on Linux.
+    Returns the path to the created updater script.
+    """
+    try:
+        # Create a temporary shell script
+        updater_path = os.path.join(tempfile.gettempdir(), 'UltraFastVideoUpdater.sh')
+        
+        # The shell script will:
+        # 1. Wait for the current process to end
+        # 2. Copy the new AppImage over the old one
+        # 3. Make it executable
+        # 4. Run the new AppImage
+        # 5. Delete itself
+        
+        updater_script = f'''#!/bin/bash
+echo "Waiting for application to close..."
+sleep 2
+
+# Wait for the app to close
+while pgrep -f "{os.path.basename(current_app_path)}" > /dev/null; do
+    sleep 1
+done
+
+echo "Updating application..."
+cp "{update_appimage_path}" "{current_app_path}"
+chmod +x "{current_app_path}"
+
+echo "Starting updated application..."
+"{current_app_path}" &
+
+echo "Cleaning up..."
+rm "{update_appimage_path}"
+rm "$0"
+exit 0
+'''
+        
+        # Write the updater script
+        with open(updater_path, 'w') as f:
+            f.write(updater_script)
+        
+        # Make the script executable
+        os.chmod(updater_path, 0o755)
+        
+        return updater_path
+    except Exception as e:
+        print(f"Error creating Linux updater: {str(e)}")
+        return None
+
+# Function to install update based on platform
+def install_update(current_path, update_path):
+    """
+    Create and run platform-specific updater to replace the application
+    """
+    try:
+        updater_path = None
+        
+        # Create appropriate updater for the platform
+        if sys.platform == "win32":
+            updater_path = create_windows_updater(current_path, update_path)
+        elif sys.platform == "darwin":  # macOS
+            updater_path = create_macos_updater(current_path, update_path)
+        else:  # Linux or other platforms
+            updater_path = create_linux_updater(current_path, update_path)
+        
+        if not updater_path:
+            raise Exception("Failed to create updater script")
+        
+        # Run the updater with appropriate method for the platform
+        if sys.platform == "win32":
+            subprocess.Popen(['cmd', '/c', updater_path], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            subprocess.Popen([updater_path], shell=False)
+        
+        return True
+    except Exception as e:
+        print(f"Error installing update: {str(e)}")
+        messagebox.showerror("Update Error", f"Failed to install update: {str(e)}")
+        return False
 
 # Function to center windows relative to root window
 def center_window(window, width, height):
@@ -2377,14 +2796,16 @@ def open_youtube_channel():
 def open_facebook_page():
     webbrowser.open("https://www.facebook.com/princeaziz011")
 
-# Function to check for updates
+# Function to check for updates - ENHANCED for automatic updates
 def check_for_updates():
+    global latest_version
+    
     try:
         # Show checking message
         update_header_message("Checking for updates...", "#2980B9")
         
-        # Fetch the latest script from GitHub
-        response = requests.get(UPDATE_URL, timeout=10)
+        # Fetch the latest script from GitHub to check version
+        response = requests.get(UPDATE_URL, timeout=10, headers={"Cache-Control": "no-cache"})
         
         if response.status_code == 200:
             # Extract version from the fetched script
@@ -2394,41 +2815,135 @@ def check_for_updates():
             if latest_version_match:
                 latest_version = latest_version_match.group(1)
                 
-                # Compare versions
-                if latest_version > VERSION:
+                # Compare versions using our robust version comparison
+                if version_compare(VERSION, latest_version) < 0:
                     # New version available
                     update_header_message(f"New version {latest_version} available!", "#2ECC71")
                     
-                    # Ask user if they want to update
-                    if messagebox.askyesno("Update Available", 
-                                         f"A new version ({latest_version}) is available. Your current version is {VERSION}.\n\nWould you like to update now?"):
-                        # Update the script
+                    # Get update info to display to user
+                    update_info = get_update_info(script_content)
+                    
+                    # Create update info dialog with more details
+                    if show_update_dialog(latest_version, VERSION, update_info):
+                        # User wants to update - proceed with update
                         try:
-                            # Get the path to the current script
+                            # Get the path to the current script or executable
                             if hasattr(sys, 'frozen'):
-                                # If running as executable
-                                script_path = sys.executable
-                                messagebox.showinfo("Update Error", 
-                                                 "Automatic updates are not supported for the executable version.\n\nPlease download the latest version manually from the GitHub repository.")
-                                return
+                                # If running as executable, download and install the update
+                                current_exe_path = sys.executable
+                                
+                                # Get platform-specific update URL
+                                update_url = get_platform_update_url()
+                                
+                                # Define update file path
+                                if sys.platform == "win32":
+                                    ext = ".exe"
+                                elif sys.platform == "darwin":
+                                    ext = ".dmg"
+                                else:
+                                    ext = ".AppImage"
+                                
+                                # Download the update to a temporary location
+                                update_file_path = os.path.join(
+                                    tempfile.gettempdir(), 
+                                    f"UltraFastVideoDownloader_{latest_version}{ext}"
+                                )
+                                
+                                # Download with progress
+                                if download_update_with_progress(update_url, update_file_path, latest_version):
+                                    # Verification prompt before installing
+                                    if messagebox.askyesno(
+                                        "Install Update", 
+                                        f"The update has been downloaded successfully. The application will "
+                                        f"close and restart with version {latest_version}.\n\n"
+                                        f"Do you want to proceed with the installation?",
+                                        icon="info"
+                                    ):
+                                        # Install the update
+                                        if install_update(current_exe_path, update_file_path):
+                                            # Show final message
+                                            messagebox.showinfo(
+                                                "Update Process Started", 
+                                                "The update will be installed when you close this window.\n\n"
+                                                "The application will restart automatically after updating."
+                                            )
+                                            # Close the application to allow the updater to complete
+                                            root.destroy()
+                                            sys.exit(0)
                             else:
-                                # If running as script
+                                # If running as script, update directly
                                 script_path = sys.argv[0]
                                 
                                 # Create backup
                                 backup_path = script_path + ".backup"
                                 shutil.copy2(script_path, backup_path)
                                 
-                                # Write the new version
-                                with open(script_path, 'w', encoding='utf-8') as f:
-                                    f.write(script_content)
+                                # Show progress dialog
+                                progress_window = ctk.CTkToplevel(root)
+                                progress_window.title("Updating Script")
+                                progress_window.geometry("400x150")
+                                progress_window.resizable(False, False)
+                                progress_window.grab_set()
                                 
-                                # Show success message
-                                if messagebox.askyesno("Update Successful", 
-                                                    f"The application has been updated to version {latest_version}.\n\nThe application needs to restart to apply the update. Restart now?"):
-                                    # Restart the application
-                                    python = sys.executable
-                                    os.execl(python, python, *sys.argv)
+                                # Center the window
+                                center_window(progress_window, 400, 150)
+                                
+                                ctk.CTkLabel(
+                                    progress_window, 
+                                    text="Updating to version " + latest_version,
+                                    font=ctk.CTkFont(size=16, weight="bold")
+                                ).pack(pady=(20, 10))
+                                
+                                progress = ctk.CTkProgressBar(progress_window, width=350)
+                                progress.pack(pady=10)
+                                progress.set(0)
+                                
+                                status_label = ctk.CTkLabel(progress_window, text="Creating backup...")
+                                status_label.pack(pady=5)
+                                
+                                def update_script():
+                                    try:
+                                        # Update progress
+                                        progress.set(0.33)
+                                        status_label.configure(text="Updating script...")
+                                        progress_window.update_idletasks()
+                                        
+                                        # Write the new version
+                                        with open(script_path, 'w', encoding='utf-8') as f:
+                                            f.write(script_content)
+                                        
+                                        # Update progress
+                                        progress.set(0.66)
+                                        status_label.configure(text="Finalizing update...")
+                                        progress_window.update_idletasks()
+                                        
+                                        time.sleep(1)  # Brief pause for user to see progress
+                                        
+                                        # Complete progress
+                                        progress.set(1.0)
+                                        status_label.configure(text="Update completed successfully!")
+                                        progress_window.update_idletasks()
+                                        
+                                        time.sleep(1)  # Brief pause before closing
+                                        
+                                        # Close progress window
+                                        progress_window.destroy()
+                                        
+                                        # Show success message and restart
+                                        if messagebox.askyesno(
+                                            "Update Successful", 
+                                            f"The application has been updated to version {latest_version}.\n\n"
+                                            f"The application needs to restart to apply the update. Restart now?"
+                                        ):
+                                            # Restart the application
+                                            python = sys.executable
+                                            os.execl(python, python, *sys.argv)
+                                    except Exception as e:
+                                        progress_window.destroy()
+                                        messagebox.showerror("Update Error", f"Failed to update script: {str(e)}")
+                                
+                                # Run update in a separate thread to keep UI responsive
+                                threading.Thread(target=update_script, daemon=True).start()
                         except Exception as e:
                             messagebox.showerror("Update Error", f"Failed to update: {str(e)}")
                 else:
@@ -2447,6 +2962,147 @@ def check_for_updates():
         # Error occurred
         update_header_message(f"Update check error: {str(e)[:50]}", "#E74C3C")
         messagebox.showerror("Update Error", f"An error occurred while checking for updates:\n\n{str(e)}")
+
+# Function to extract update information from the script
+def get_update_info(script_content):
+    """
+    Extract update information from the script content.
+    Returns a list of update notes if found, otherwise a generic message.
+    """
+    try:
+        # Look for update notes in format: # UPDATE NOTES: version 2.8.1
+        update_section = re.search(r'# UPDATE NOTES:.*?\n(.*?)(?=\n\n|\n#)', script_content, re.DOTALL)
+        
+        if update_section:
+            # Extract and format update notes
+            notes = update_section.group(1).strip().split('\n')
+            # Clean up notes (remove # and extra whitespace)
+            clean_notes = [note.strip().lstrip('#').strip() for note in notes if note.strip()]
+            return clean_notes
+        
+        # If no specific update notes, provide a generic message
+        return ["New version with improvements and bug fixes."]
+    except Exception as e:
+        print(f"Error extracting update info: {str(e)}")
+        return ["New version with improvements and bug fixes."]
+
+# Function to show update dialog with details
+def show_update_dialog(new_version, current_version, update_info):
+    """
+    Show an enhanced update dialog with version comparison and update notes.
+    Returns True if user wants to update, False otherwise.
+    """
+    try:
+        # Create update dialog
+        update_window = ctk.CTkToplevel(root)
+        update_window.title("Update Available")
+        update_window.geometry("500x350")
+        update_window.resizable(False, False)
+        update_window.grab_set()
+        update_window.transient(root)
+        
+        # Center the window
+        center_window(update_window, 500, 350)
+        
+        # Result variable
+        result = [False]
+        
+        # Header
+        header_frame = ctk.CTkFrame(update_window, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(20, 10))
+        
+        # Title
+        title = ctk.CTkLabel(
+            header_frame, 
+            text="New Version Available!",
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        title.pack(anchor="center")
+        
+        # Version comparison
+        version_frame = ctk.CTkFrame(update_window, fg_color="transparent")
+        version_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        version_box = ctk.CTkFrame(version_frame, fg_color="#f0f0f0", corner_radius=6)
+        version_box.pack(fill="x", pady=5, ipady=10)
+        
+        version_label = ctk.CTkLabel(
+            version_box,
+            text=f"Current Version: {current_version}  →  New Version: {new_version}",
+            font=ctk.CTkFont(size=14)
+        )
+        version_label.pack()
+        
+        # Update notes section
+        notes_frame = ctk.CTkFrame(update_window, fg_color="transparent")
+        notes_frame.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        
+        notes_header = ctk.CTkLabel(
+            notes_frame,
+            text="What's New:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        notes_header.pack(anchor="w", pady=(0, 5))
+        
+        # Scrollable text area for update notes
+        notes_text = ctk.CTkTextbox(notes_frame, height=120, width=460)
+        notes_text.pack(fill="both", expand=True)
+        
+        # Insert update notes with formatting
+        notes_text.configure(state="normal")
+        for i, note in enumerate(update_info):
+            notes_text.insert("end", f"• {note}\n")
+        notes_text.configure(state="disabled")
+        
+        # Button frame
+        button_frame = ctk.CTkFrame(update_window, fg_color="transparent")
+        button_frame.pack(fill="x", padx=20, pady=(0, 20))
+        
+        # Update button
+        def update_clicked():
+            result[0] = True
+            update_window.destroy()
+        
+        update_button = ctk.CTkButton(
+            button_frame,
+            text="Install Update",
+            command=update_clicked,
+            fg_color="#2ecc71",
+            hover_color="#27ae60",
+            width=150,
+            height=36
+        )
+        update_button.pack(side="left", padx=(0, 10))
+        
+        # Skip button
+        def skip_clicked():
+            result[0] = False
+            update_window.destroy()
+        
+        skip_button = ctk.CTkButton(
+            button_frame,
+            text="Remind Me Later",
+            command=skip_clicked,
+            fg_color="#95a5a6",
+            hover_color="#7f8c8d",
+            width=150,
+            height=36
+        )
+        skip_button.pack(side="right", padx=(10, 0))
+        
+        # Wait for the window to close
+        update_window.wait_window()
+        
+        return result[0]
+    except Exception as e:
+        print(f"Error showing update dialog: {str(e)}")
+        # Fallback to simple dialog
+        return messagebox.askyesno(
+            "Update Available", 
+            f"A new version ({new_version}) is available. Your current version is {current_version}.\n\n"
+            f"Would you like to update now?"
+        )
 
 # Global variables to store icon references (to prevent garbage collection)
 menu_icons = {}
