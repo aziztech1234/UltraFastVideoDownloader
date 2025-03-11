@@ -23,14 +23,132 @@ import ssl  # Added for secure connections
 import tempfile  # Added for temporary file handling
 
 # Tool version
-VERSION = "2.8.1"  # Current version number with fixes
+VERSION = "2.8.2"  # Current version number with fixes
 
 # Server URLs
 SERVER_URL = "https://raw.githubusercontent.com/aziztech1234/License-Keys/main/keys.json"
 # GitHub URL for updates
 UPDATE_URL = "https://raw.githubusercontent.com/aziztech1234/UltraFastVideoDownloader/main/downloader.py"
 # Base URL for executable downloads
-EXECUTABLE_BASE_URL = "https://github.com/aziztech1234/UltraFastVideoDownloader/releases/latest/download/"
+EXECUTABLE_BASE_URL = "https://github.com/aziztech1234/UltraFastVideoDownloader/releases/download/v2.8.1/Ultra.Fast.Video.Downloader.exe"
+
+# User tracking with Firebase
+def track_user_session():
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, db
+        
+        # Get a unique identifier for this device/user
+        device_id = get_device_id()
+        
+        # Check if Firebase credentials file exists, if not create it
+        cred_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                "ultra-fast-downloader-firebase-adminsdk.json")
+        if not os.path.exists(cred_path):
+            # Create the file with contents from the document
+            create_firebase_credentials_file(cred_path)
+        
+        # Check if Firebase is already initialized
+        if not firebase_admin._apps:
+            # Initialize Firebase with the credentials
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': 'https://ultra-fast-downloader-default-rtdb.firebaseio.com'
+            })
+        
+        # Log user activity
+        ref = db.reference('active_users')
+        user_ref = ref.child(device_id)
+        user_ref.update({
+            'last_active': time.time(),
+            'version': VERSION,
+            'platform': sys.platform
+        })
+        
+        print("User tracking enabled")
+    except Exception as e:
+        print(f"User tracking error: {str(e)}")
+
+# Function to create Firebase credentials file
+def create_firebase_credentials_file(cred_path):
+    try:
+        credentials_json = {
+            "type": "service_account",
+            "project_id": "ultra-fast-downloader",
+            "private_key_id": "8122bce566f2ff5e0c010dda31637c0bfeed85f0",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDCJyzbixP9QIAr\nXh/QFvi075iOy4rDMZ2i79lFdhUFbcImfuqJJVDRInHjcw4tlBj4gvWaDkJ//ACp\n2i3vpFXqm3obn2mOwjVpl8NzsfsaXp0ieeHRUgiW4bEnNO8V7PIvrp8J5BUEpWM4\nnBaF42C4gOsIdPjJ0oMzsrCPlxVMxKIfHNZF9zpTp4FufEUJBN64sWbZZKitknNg\nypzb+v16PuY7Yln7p0voQmlYWOCLBQl/BwV0P6hXUfr6KoH9pMSu9y947gQZhGgn\nPTpygkLRC4SNy5oucuSIhN/t9O2vRa62YyZzH0IY1Igf8e+NWzYmBBUw1Rh8ysY4\nW8R365ZfAgMBAAECggEAG5jc7/Hza+6UqVVuOTJitLlP2pBFD5zIVuY34H852rUw\nwS8OIGNs+uUmAhoTHFhuOjjHN1gqjK2h3ILWP7eAvOHPuAhvRSsG05UOY64bTrK/\nLCzd89ZwwR2ghD2qdFfjTvLHyWyhrjDiCyRosSxSTbeJcQDLckiZfKo8HZTwoqIb\nKV/QRMmwh6cBQzKiyjhSK84Z2bq+rdc4WW2hgugxjCjQ4RJU083PpPKNWetAJOjF\neKf1u3vVxRcXsTL7Tu6OoJ2kB8f6qzZBg4t8QdMvxUTT0TXFuqpFzHljiXLwrML/\nKL3wuprSkavyio+7K4szvYSw1Mkkr4FM/gDlS02DUQKBgQDn90UK+ow9cVgwovVo\nP+t3Y1Coy5ElSO1SXWI31MhRX9gHn6rZtUmVzAPNdWw6NCFuSAryKjoejrawZ5Mg\nw2mDjolkwkbuqIj32YUkiiAp1ZY8el6ff7KToz/+vVvOt5g9FgmzULlvNvsmVIvo\nwWLqOIOQIOwR+5njG/+56GlwrwKBgQDWRPIzEvkR7NWJGSLb8AXsLG/2b6R7XccM\nk7moaSKHRM8Tplwkm6ZYZIq5KxZBH0iPs8Ov7s9hOT3ZDdNQ2eLxPAMz1Kzsw5sq\nj+S/bhSHlMI2ZAn69YrdxUMe3KFcpKqL+WKoHdypMY68z8Y3u6ZQDr4GzQyrTfr4\nJyYhAdXBUQKBgQCJS7vb4av7+ghe0TU7vQmbonbtUX/Zd66wH4Gw1gqyz23IJWM0\ndK7XMOfXRfcHBC/9XDrOVtwLliDfjI5yx/a93THJJ4xgWfSn7mF13SNoX3kK1ssG\n0MhbxjZsipu6YMSE83ROZCs9fmdsqoIdA8mOJGEKf9H6Wtccq0fTO5KdFQKBgDeT\nxJrY1f//RVf9TBxuQqsCz7vFM43IQkQR4Ts8ofciMvAu24GnWdtdoNnswiX8Hk8f\n2qc8s0/NkCxHuMMk8QePgGkmRgBXsFy23CeHPw332PRQuIH+xJlHfGR55+Tm1VHf\nSua+cCj2sMZqwkhchQQI/uM2to2MeYd6aBpxpmcxAoGBAIJzwPKtf48iJVuwH2iD\npCuOxlgtiMvfBXdBFfALCaKNurJoqh6vG3XcWZqDQYfGIF2aPiwzq+zDSlL0H+mn\niqqyBaAqasXMgdfxL4LBhMtLoRBDawmajlrg2fMhYx4X0B0Mh/e+gB8hDpmQoQjP\nI+I8uLf2yHFe3J3c5CQT577q\n-----END PRIVATE KEY-----\n",
+            "client_email": "firebase-adminsdk-fbsvc@ultra-fast-downloader.iam.gserviceaccount.com",
+            "client_id": "118013463899689979137",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40ultra-fast-downloader.iam.gserviceaccount.com",
+            "universe_domain": "googleapis.com"
+        }
+        
+        with open(cred_path, 'w') as f:
+            json.dump(credentials_json, f, indent=2)
+            
+        print(f"Firebase credentials file created at {cred_path}")
+    except Exception as e:
+        print(f"Error creating Firebase credentials file: {str(e)}")
+
+# Function to get a unique device ID
+def get_device_id():
+    try:
+        if sys.platform == "win32":
+            # Get Windows machine GUID
+            import winreg
+            reg_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                                    r"SOFTWARE\Microsoft\Cryptography", 0, 
+                                    winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+            machine_guid, _ = winreg.QueryValueEx(reg_key, "MachineGuid")
+            return machine_guid
+        elif sys.platform == "darwin":
+            # Get macOS serial number
+            import subprocess
+            return subprocess.check_output(
+                ['/usr/sbin/system_profiler', 'SPHardwareDataType']
+            ).decode('utf-8').split('Serial Number (system): ')[1].split('\n')[0]
+        else:
+            # For Linux, use machine-id
+            with open('/etc/machine-id', 'r') as f:
+                return f.read().strip()
+    except Exception as e:
+        print(f"Error getting device ID: {str(e)}")
+        # Fallback to a random ID that's consistent across restarts
+        import uuid
+        id_file = os.path.join(os.path.expanduser("~"), ".video_downloader_id")
+        if os.path.exists(id_file):
+            with open(id_file, 'r') as f:
+                return f.read().strip()
+        else:
+            device_id = str(uuid.uuid4())
+            with open(id_file, 'w') as f:
+                f.write(device_id)
+            return device_id
+
+# Function to get resource path (add this first)
+def get_resource_path(relative_path):
+    """Get the absolute path to a resource for both development and PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    
+    return os.path.join(base_path, relative_path)
+
+# Add this function to override yt-dlp's binary location (place it right after get_resource_path)
+def override_ytdlp_binary():
+    try:
+        # Set environment to use our bundled yt-dlp
+        bundled_ytdlp = get_resource_path(os.path.join("bin", "yt-dlp.exe"))
+        if os.path.exists(bundled_ytdlp):
+            os.environ["YTDLP_EXECUTABLE"] = bundled_ytdlp
+            print(f"Using bundled yt-dlp: {bundled_ytdlp}")
+    except Exception as e:
+        print(f"Error setting yt-dlp path: {str(e)}")
 
 # Global variable for storing the latest version during update checks
 latest_version = None
@@ -117,8 +235,8 @@ def download_update_with_progress(url, target_path, version):
         
         # Center the window
         center_window(progress_window, 450, 220)
-        
-        # Add labels and progress bar
+		
+# Add labels and progress bar
         header_frame = ctk.CTkFrame(progress_window, fg_color="transparent")
         header_frame.pack(fill="x", padx=20, pady=(20, 5))
         
@@ -289,13 +407,13 @@ echo Waiting for application to close...
 timeout /t 2 /nobreak > nul
 :wait_loop
 tasklist | find /i "{os.path.basename(current_exe_path)}" > nul
-if %errorlevel% equ 0 (
+if %%errorlevel%% equ 0 (
     timeout /t 1 /nobreak > nul
     goto wait_loop
 )
 echo Updating application...
 copy /y "{update_exe_path}" "{current_exe_path}"
-if %errorlevel% neq 0 (
+if %%errorlevel%% neq 0 (
     echo Update failed. Please download the new version manually.
     pause
     exit /b 1
@@ -304,7 +422,7 @@ echo Starting updated application...
 start "" "{current_exe_path}"
 echo Cleaning up...
 del "{update_exe_path}"
-del "%~f0"
+del "%%~f0"
 exit
 '''
         
@@ -1043,8 +1161,13 @@ def get_alternate_user_agent(platform, attempt):
     return user_agents[attempt % len(user_agents)]
 
 def get_ffmpeg_path():
-    """Try to find ffmpeg in the system"""
-    # Check common paths
+    """Try to find ffmpeg in the bundled system"""
+    # First check for bundled binary
+    bundled_path = get_resource_path(os.path.join("bin", "ffmpeg.exe"))
+    if os.path.exists(bundled_path):
+        return bundled_path
+        
+    # Check common paths as fallback
     common_paths = [
         "",  # empty string will use system PATH
         os.path.join(os.path.dirname(sys.executable), "ffmpeg"),
@@ -1064,7 +1187,7 @@ def get_ffmpeg_path():
         except:
             continue
     
-    return None  # Let yt-dlp find ffmpeg
+    return None  # Let yt-dlp find ffmpeg 
     
 # COMPLETELY REWRITTEN DOWNLOAD FUNCTION WITH FIX FOR THUMBNAIL ISSUE
 def download_video(url, download_path, quality, thread_count, row_id):
@@ -1084,8 +1207,7 @@ def download_video(url, download_path, quality, thread_count, row_id):
     # Create platform-specific folder
     platform_path = os.path.join(download_path, platform)
     if not os.path.exists(platform_path):
-        os.makedirs(
-  platform_path)
+        os.makedirs(platform_path)
     
     # Get optimized format selection for this platform
     format_option = get_format_options(platform, quality)
@@ -1171,9 +1293,13 @@ def download_video(url, download_path, quality, thread_count, row_id):
             with open(cookie_file, 'w') as f:
                 f.write("# Instagram cookies file\n")
         
+        # Add timestamp to ensure unique filenames for Instagram videos
+        timestamp = int(time.time())
+        
         ydl_opts.update({
             'cookiefile': cookie_file,
             'extract_flat': 'in_playlist',  # Better for profile pages
+            'outtmpl': os.path.join(platform_path, f'%(title)s_{timestamp}.%(ext)s'),  # Add timestamp to ensure uniqueness
             'postprocessors': [
                 {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
                 {'key': 'FFmpegMetadata', 'add_metadata': True},
@@ -3107,27 +3233,12 @@ def show_update_dialog(new_version, current_version, update_info):
 # Global variables to store icon references (to prevent garbage collection)
 menu_icons = {}
 
-# FIXED: Load menu icons function to load from application directory
+# IMPROVED: Load menu icons function to load from application directory or embedded resources
 def load_menu_icons():
-    """
-    Enhanced function to load menu icons from the application directory
-    - Fixes Issue #3: Context menu icons not showing for other users
-    """
+    """Enhanced function to load menu icons from the application directory"""
     global menu_icons
     
     try:
-        # Determine the application directory - works with both script and executable
-        if hasattr(sys, 'frozen'):  # Running as compiled exe
-            app_dir = os.path.dirname(sys.executable)
-        else:  # Running as script
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-            
-        # If app_dir is empty (when run from current directory), use current directory
-        if not app_dir:
-            app_dir = os.getcwd()
-            
-        print(f"Looking for icons in: {app_dir}")
-        
         # Define icon filenames
         icon_filenames = {
             "remove": "Remove From List.png",
@@ -3135,36 +3246,24 @@ def load_menu_icons():
             "play": "Play Video.png",
             "folder": "Open Folder.png",
             "copy": "Copy Url.png",
-            "retry": "Retry Download.png"  # Added retry icon
+            "retry": "Retry Download.png"
         }
         
-        # Try to load each icon from the application directory
+        # Try to load each icon using get_resource_path
         for key, filename in icon_filenames.items():
             # Full path to the icon
-            icon_path = os.path.join(app_dir, filename)
+            icon_path = get_resource_path(os.path.join("icons", filename))
             
             if os.path.exists(icon_path):
                 # Load and resize the image to appropriate menu size
                 img = Image.open(icon_path)
-                img = img.resize((16, 16), Image.Resampling.LANCZOS)
+                img = img.resize((16, 16), Image.RESAMPLING.LANCZOS)
                 menu_icons[key] = ImageTk.PhotoImage(img)
                 print(f"Loaded icon: {filename}")
             else:
-                # Icon not found, try alternative locations
-                print(f"Icon not found at {icon_path}, trying alternatives")
-                # Try in an 'icons' subdirectory
-                alt_path = os.path.join(app_dir, "icons", filename)
-                if os.path.exists(alt_path):
-                    img = Image.open(alt_path)
-                    img = img.resize((16, 16), Image.Resampling.LANCZOS)
-                    menu_icons[key] = ImageTk.PhotoImage(img)
-                    print(f"Loaded icon from alternative path: {alt_path}")
-                else:
-                    print(f"Warning: Icon {filename} not found")
+                print(f"Warning: Icon {filename} not found at {icon_path}")
     except Exception as e:
         print(f"Error loading menu icons: {str(e)}")
-        # Don't stop the application if icons can't be loaded
-        # The menu will still work without icons
 
 # Function to handle right-click context menu events
 def show_context_menu(event):
@@ -3986,6 +4085,9 @@ def open_downloader(license_key):
     global quality_var, thread_count_var, progress_bar, start_bulk_button
     global link_count_label, tool_version_label, footer_label, video_table, header_label
     
+    # Track user session with Firebase
+    track_user_session()
+    
     # Load settings
     load_settings()
     
@@ -4271,5 +4373,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
-        
